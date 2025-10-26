@@ -10,7 +10,9 @@ interface PlayerStatsProps {
   networkSpeed: 'fast' | 'medium' | 'slow';
   bandwidthMbps: number;
   bandwidthTrend: 'stable' | 'increasing' | 'decreasing';
-  realBitrate?: number; // Ajout du bitrate réel mesuré
+  realBitrate?: number;
+  healthStatus?: any;
+  abrState?: any;
 }
 
 export const PlayerStats = ({ 
@@ -22,7 +24,9 @@ export const PlayerStats = ({
   networkSpeed,
   bandwidthMbps,
   bandwidthTrend,
-  realBitrate = 0
+  realBitrate = 0,
+  healthStatus,
+  abrState
 }: PlayerStatsProps) => {
   const metrics = useVideoMetrics(videoElement);
 
@@ -55,12 +59,24 @@ export const PlayerStats = ({
           <Activity className="w-4 h-4 animate-pulse" />
           <span className="text-sm">Analytics Pro</span>
         </div>
-        <div className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-          bufferHealth > 70 ? 'bg-green-400/20 text-green-400' :
-          bufferHealth > 40 ? 'bg-yellow-400/20 text-yellow-400' :
-          'bg-red-400/20 text-red-400'
-        }`}>
-          LIVE
+        <div className="flex items-center gap-1.5">
+          {healthStatus && (
+            <div className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+              healthStatus.level === 'excellent' ? 'bg-green-400/20 text-green-400' :
+              healthStatus.level === 'good' ? 'bg-blue-400/20 text-blue-400' :
+              healthStatus.level === 'warning' ? 'bg-yellow-400/20 text-yellow-400' :
+              'bg-red-400/20 text-red-400'
+            }`}>
+              {healthStatus.score}/100
+            </div>
+          )}
+          <div className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+            bufferHealth > 70 ? 'bg-green-400/20 text-green-400' :
+            bufferHealth > 40 ? 'bg-yellow-400/20 text-yellow-400' :
+            'bg-red-400/20 text-red-400'
+          }`}>
+            LIVE
+          </div>
         </div>
       </div>
       
@@ -168,6 +184,58 @@ export const PlayerStats = ({
             </div>
           )}
         </div>
+
+        {/* ABR Status */}
+        {abrState && abrState.currentQuality && (
+          <div className="bg-primary/10 rounded-lg p-2.5 space-y-2 border border-primary/30">
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-primary text-[11px] font-semibold">
+                <Zap className="w-3.5 h-3.5" />
+                ABR Actif
+              </span>
+              <span className="font-mono text-primary font-bold text-xs">
+                {abrState.currentQuality.label}
+              </span>
+            </div>
+            {abrState.isAdapting && abrState.targetQuality && (
+              <div className="text-[10px] text-yellow-400 animate-pulse">
+                → Passage vers {abrState.targetQuality.label}
+              </div>
+            )}
+            {abrState.switchCount > 0 && (
+              <div className="text-[10px] text-white/60">
+                {abrState.switchCount} adaptation{abrState.switchCount > 1 ? 's' : ''}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Health Issues */}
+        {healthStatus && healthStatus.issues.length > 0 && (
+          <div className="bg-red-500/10 rounded-lg p-2.5 space-y-1.5 border border-red-500/30">
+            <div className="flex items-center gap-1.5 text-red-400 text-[11px] font-semibold">
+              <AlertCircle className="w-3.5 h-3.5" />
+              Problèmes détectés
+            </div>
+            {healthStatus.issues.map((issue: string, i: number) => (
+              <div key={i} className="text-[10px] text-red-300">
+                • {issue}
+              </div>
+            ))}
+            {healthStatus.recommendations.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-red-500/20">
+                <div className="text-[10px] text-yellow-300 font-semibold mb-1">
+                  Recommandations:
+                </div>
+                {healthStatus.recommendations.map((rec: string, i: number) => (
+                  <div key={i} className="text-[10px] text-yellow-200">
+                    → {rec}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Performance Metrics */}
         {(metrics.droppedFrames > 0 || metrics.totalFrames > 0) && (

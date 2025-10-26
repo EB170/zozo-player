@@ -11,6 +11,8 @@ import { useBandwidthMonitor } from "@/hooks/useBandwidthMonitor";
 import { useErrorRecovery } from "@/hooks/useErrorRecovery";
 import { useVideoMetrics } from "@/hooks/useVideoMetrics";
 import { useRealBandwidth } from "@/hooks/useRealBandwidth";
+import { useHealthMonitor } from "@/hooks/useHealthMonitor";
+import { useAdaptiveBitrate } from "@/hooks/useAdaptiveBitrate";
 import { parseHLSManifest, recommendQuality, StreamQuality } from "@/utils/manifestParser";
 import { toast } from "sonner";
 
@@ -70,6 +72,20 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const errorRecovery = useErrorRecovery();
   const activeVideo = activeVideoRef.current === 1 ? video1Ref.current : video2Ref.current;
   const videoMetrics = useVideoMetrics(activeVideo);
+  const { health: healthStatus, reset: resetHealth } = useHealthMonitor(activeVideo);
+  const { abrState } = useAdaptiveBitrate(
+    availableQualities,
+    realBandwidth.currentBitrate || bandwidthMetrics.currentBandwidth,
+    videoMetrics.bufferLevel,
+    healthStatus.score,
+    { 
+      enabled: quality === 'auto',
+      switchThreshold: 3,
+      minSwitchInterval: 10000,
+      bufferTargetUp: 8,
+      bufferTargetDown: 2,
+    }
+  );
 
   const getActiveVideo = () => {
     return activeVideoRef.current === 1 ? video1Ref.current : video2Ref.current;
@@ -143,6 +159,34 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     cleanupPlayer(mpegts2Ref, hls2Ref);
   };
 
+  // ABR automatique - appliquer les changements de qualité
+  useEffect(() => {
+    if (abrState.currentQuality && quality === 'auto' && playerTypeRef.current === 'hls') {
+      console.log(`🎬 ABR applying quality: ${abrState.currentQuality.label}`);
+      // Trigger reload avec nouvelle qualité
+      if (!isTransitioning) {
+        toast.info(`📊 ABR: ${abrState.currentQuality.label}`, {
+          description: abrState.adaptationReason,
+          duration: 2000,
+        });
+      }
+    }
+  }, [abrState.currentQuality, quality, isTransitioning]);
+
+  // Monitoring health et alertes
+  useEffect(() => {
+    if (healthStatus.level === 'critical' && healthStatus.issues.length > 0) {
+      console.warn('🚨 Health critical:', healthStatus.issues);
+      
+      if (healthStatus.issues.includes('Buffer critique')) {
+        toast.warning("Buffer critique", {
+          description: "Adaptation de la qualité en cours...",
+          duration: 3000,
+        });
+      }
+    }
+  }, [healthStatus.level, healthStatus.issues]);
+
   // Parser manifest HLS pour détecter qualités disponibles
   useEffect(() => {
     if (streamUrl.includes('.m3u8') && playerTypeRef.current === 'hls') {
@@ -150,7 +194,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         if (qualities.length > 0) {
           setAvailableQualities(qualities);
           setManifestUrl(streamUrl);
-          console.log('📺 Qualités HLS détectées:', qualities.map(q => q.label));
+          console.log('📺 Qualités HLS détectées:', qualities.map(q => `${q.label} (${(q.bandwidth/1000000).toFixed(1)} Mbps)`));
+          toast.success(`${qualities.length} qualités HLS disponibles`, {
+            description: 'Adaptation automatique activée',
+            duration: 2000,
+          });
         }
       });
     } else {
@@ -159,15 +207,15 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     }
   }, [streamUrl]);
 
-  // Auto quality selection basée sur real bandwidth
+  // Auto quality selection basée sur real bandwidth + health
   useEffect(() => {
     if (quality === 'auto' && availableQualities.length > 0 && realBandwidth.averageBitrate > 0) {
-      const recommended = recommendQuality(realBandwidth.averageBitrate, availableQualities);
-      if (recommended) {
-        console.log(`🎯 Auto-quality: ${recommended.label} (bandwidth: ${realBandwidth.averageBitrate.toFixed(2)} Mbps)`);
+      // L'ABR hook gère déjà la sélection automatique
+      if (abrState.currentQuality) {
+        console.log(`🎯 ABR active: ${abrState.currentQuality.label} (health: ${healthStatus.score})`);
       }
     }
-  }, [quality, availableQualities, realBandwidth.averageBitrate]);
+  }, [quality, availableQualities, realBandwidth.averageBitrate, abrState.currentQuality, healthStatus.score]);
 
   // Adapter buffer selon bandwidth réel et qualité
   const getOptimalBufferSize = () => {
@@ -727,13 +775,25 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         preload="auto"
       />
 
-      {/* Quality indicator */}
+      {/* Quality indicator avec health status */}
       {!isLoading && videoMetrics.resolution !== 'N/A' && (
-        <QualityIndicator
-          resolution={videoMetrics.resolution}
-          bitrate={videoMetrics.actualBitrate}
-          bufferHealth={bufferHealth}
-        />
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-2 z-30">
+          <QualityIndicator
+            resolution={videoMetrics.resolution}
+            bitrate={videoMetrics.actualBitrate}
+            bufferHealth={bufferHealth}
+          />
+          {abrState.isAdapting && (
+            <div className="bg-yellow-500/90 backdrop-blur-xl border border-yellow-400/40 rounded-full px-3 py-1.5 flex items-center gap-1.5 shadow-2xl animate-pulse">
+              <span className="text-xs font-bold text-black">⚡ ABR</span>
+            </div>
+          )}
+          {healthStatus.level === 'critical' && (
+            <div className="bg-red-500/90 backdrop-blur-xl border border-red-400/40 rounded-full px-3 py-1.5 flex items-center gap-1.5 shadow-2xl animate-pulse">
+              <span className="text-xs font-bold text-white">⚠️ Critique</span>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Stats overlay */}
@@ -747,6 +807,8 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         bandwidthMbps={bandwidthMetrics.currentBandwidth}
         bandwidthTrend={bandwidthMetrics.trend}
         realBitrate={realBandwidth.currentBitrate}
+        healthStatus={healthStatus}
+        abrState={abrState}
       />
 
       {/* Settings overlay */}
