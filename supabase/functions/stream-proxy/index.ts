@@ -28,20 +28,31 @@ serve(async (req) => {
 
     console.log('Proxying stream:', streamUrl);
 
+    // Build headers to bypass IPTV stream protections
+    const forwardHeaders: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'identity',
+      'Connection': 'keep-alive',
+      'Referer': new URL(streamUrl).origin,
+    };
+
     // Forward range headers for HLS/TS streaming
-    const forwardHeaders: Record<string, string> = {};
     const range = req.headers.get('range');
     if (range) {
-      forwardHeaders['range'] = range;
+      forwardHeaders['Range'] = range;
     }
 
-    // Fetch the stream with timeout
+    // Fetch the stream with extended timeout and redirects
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    const timeoutId = setTimeout(() => controller.abort(), 45000);
 
     const response = await fetch(streamUrl, {
       headers: forwardHeaders,
       signal: controller.signal,
+      redirect: 'follow',
+      keepalive: true,
     });
 
     clearTimeout(timeoutId);
