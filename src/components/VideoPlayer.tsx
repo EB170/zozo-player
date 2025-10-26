@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
+import videojs from "video.js";
+import "video.js/dist/video-js.css";
 import { Play, Pause, Volume2, VolumeX, Maximize, Loader2, AlertCircle } from "lucide-react";
 import { Button } from "./ui/button";
 import { Slider } from "./ui/slider";
@@ -11,7 +13,8 @@ interface VideoPlayerProps {
   autoPlay?: boolean;
 }
 
-// Helper function to proxy stream URLs through our backend
+type PlayerType = 'hls' | 'videojs' | 'native' | null;
+
 const getProxiedUrl = (originalUrl: string): string => {
   const projectId = "wxkvljkvqcamktlwfmfx";
   const proxyUrl = `https://${projectId}.supabase.co/functions/v1/stream-proxy`;
@@ -21,268 +24,319 @@ const getProxiedUrl = (originalUrl: string): string => {
 export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const videojsRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  
+  const [currentPlayer, setCurrentPlayer] = useState<PlayerType>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [playerAttempts, setPlayerAttempts] = useState<PlayerType[]>([]);
+  
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
   const loadingTimeoutRef = useRef<NodeJS.Timeout>();
+  const retryTimeoutRef = useRef<NodeJS.Timeout>();
   const { toast } = useToast();
 
-  useEffect(() => {
-    if (!videoRef.current) return;
-
-    const video = videoRef.current;
-    setError(null);
-    setIsLoading(true);
-
-    const proxiedUrl = getProxiedUrl(streamUrl);
-    console.log('Original URL:', streamUrl);
-    console.log('Proxied URL:', proxiedUrl);
-
-    // Set loading timeout
-    if (loadingTimeoutRef.current) {
-      clearTimeout(loadingTimeoutRef.current);
+  // Cleanup function
+  const cleanupPlayers = () => {
+    if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
+    if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
+    
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
     }
-    loadingTimeoutRef.current = setTimeout(() => {
-      if (isLoading) {
-        const errorMsg = 'Le flux vidéo ne répond pas. Le flux peut être temporairement indisponible.';
-        setError(errorMsg);
-        setIsLoading(false);
-        
-        toast({
-          title: "Erreur de chargement",
-          description: errorMsg,
-          variant: "destructive",
-        });
-      }
-    }, 20000); // 20 seconds timeout
+    
+    if (videojsRef.current) {
+      videojsRef.current.dispose();
+      videojsRef.current = null;
+    }
+    
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.removeAttribute('src');
+      videoRef.current.load();
+    }
+  };
 
-    // Check if HLS is supported
-    if (Hls.isSupported()) {
-      console.log('HLS.js is supported, initializing...');
+  // Try HLS.js player
+  const tryHlsPlayer = (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      if (!videoRef.current || !Hls.isSupported()) {
+        console.log('HLS.js not supported');
+        resolve(false);
+        return;
+      }
+
+      console.log('Trying HLS.js player...');
+      const video = videoRef.current;
+      const proxiedUrl = getProxiedUrl(streamUrl);
       
       const hls = new Hls({
         debug: false,
         enableWorker: true,
-        lowLatencyMode: true,
-        backBufferLength: 90,
+        lowLatencyMode: false,
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
-        maxBufferSize: 60 * 1000 * 1000,
-        maxBufferHole: 0.5,
-        highBufferWatchdogPeriod: 2,
-        nudgeOffset: 0.1,
-        nudgeMaxRetry: 3,
-        maxFragLookUpTolerance: 0.25,
-        liveSyncDurationCount: 3,
-        liveMaxLatencyDurationCount: 10,
-        liveDurationInfinity: true,
-        liveBackBufferLength: 0,
-        maxLiveSyncPlaybackRate: 1.5,
-        manifestLoadingTimeOut: 20000,
-        manifestLoadingMaxRetry: 6,
-        manifestLoadingRetryDelay: 500,
-        levelLoadingTimeOut: 20000,
-        levelLoadingMaxRetry: 6,
-        fragLoadingTimeOut: 30000,
-        fragLoadingMaxRetry: 12,
-        fragLoadingRetryDelay: 500,
-        xhrSetup: (xhr: XMLHttpRequest, url: string) => {
-          // Ensure all requests go through proxy
-          if (!url.includes('stream-proxy')) {
-            const proxied = getProxiedUrl(url);
-            xhr.open('GET', proxied, true);
-          }
-        },
+        manifestLoadingTimeOut: 15000,
+        manifestLoadingMaxRetry: 3,
+        levelLoadingTimeOut: 15000,
+        fragLoadingTimeOut: 20000,
+        fragLoadingMaxRetry: 6,
       });
 
-      hlsRef.current = hls;
-
-      // HLS event listeners
-      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        console.log('HLS: Media attached');
-      });
-
-      hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
-        console.log('HLS: Manifest parsed, levels:', data.levels.length);
-        setIsLoading(false);
-        if (loadingTimeoutRef.current) {
-          clearTimeout(loadingTimeoutRef.current);
+      let resolved = false;
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          console.log('HLS.js timeout');
+          hls.destroy();
+          resolve(false);
         }
-        
-        if (autoPlay) {
+      }, 10000);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          console.log('HLS.js success!');
+          hlsRef.current = hls;
+          setCurrentPlayer('hls');
+          
           video.play()
-            .then(() => {
-              console.log('HLS: Autoplay started');
-              setIsPlaying(true);
-            })
-            .catch((err) => {
-              console.error('HLS: Autoplay failed', err);
-              // User interaction required for autoplay
-              setIsLoading(false);
-            });
-        }
-      });
-
-      hls.on(Hls.Events.FRAG_LOADED, () => {
-        setIsLoading(false);
-        if (loadingTimeoutRef.current) {
-          clearTimeout(loadingTimeoutRef.current);
+            .then(() => setIsPlaying(true))
+            .catch(() => {});
+          
+          resolve(true);
         }
       });
 
       hls.on(Hls.Events.ERROR, (event, data) => {
-        console.error('HLS Error:', data.type, data.details, data.fatal);
-        
-        if (data.fatal) {
-          switch (data.type) {
-            case Hls.ErrorTypes.NETWORK_ERROR:
-              console.log('HLS: Fatal network error, trying to recover...');
-              hls.startLoad();
-              break;
-            case Hls.ErrorTypes.MEDIA_ERROR:
-              console.log('HLS: Fatal media error, trying to recover...');
-              hls.recoverMediaError();
-              break;
-            default:
-              console.error('HLS: Fatal error, cannot recover');
-              setError('Impossible de lire le flux. Le format n\'est pas supporté ou le flux est corrompu.');
-              setIsLoading(false);
-              toast({
-                title: "Erreur fatale",
-                description: "Impossible de lire ce flux vidéo.",
-                variant: "destructive",
-              });
-              hls.destroy();
-              break;
-          }
+        if (data.fatal && !resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          console.log('HLS.js fatal error:', data.details);
+          hls.destroy();
+          resolve(false);
         }
       });
 
-      // Load source
       hls.loadSource(proxiedUrl);
       hls.attachMedia(video);
+    });
+  };
 
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      // Native HLS support (Safari)
-      console.log('Native HLS support detected');
-      video.src = proxiedUrl;
-      
-      video.addEventListener('loadedmetadata', () => {
-        console.log('Native HLS: Metadata loaded');
-        setIsLoading(false);
-        if (loadingTimeoutRef.current) {
-          clearTimeout(loadingTimeoutRef.current);
-        }
-      });
-
-      if (autoPlay) {
-        video.play()
-          .then(() => {
-            setIsPlaying(true);
-          })
-          .catch((err) => {
-            console.error('Native HLS: Autoplay failed', err);
-            setIsLoading(false);
-          });
+  // Try Video.js player
+  const tryVideojsPlayer = (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      if (!videoRef.current) {
+        resolve(false);
+        return;
       }
-    } else {
-      // Direct TS stream fallback
-      console.log('No HLS support, trying direct stream...');
-      video.src = proxiedUrl;
-      
-      video.addEventListener('loadeddata', () => {
-        console.log('Direct stream: Data loaded');
-        setIsLoading(false);
-        if (loadingTimeoutRef.current) {
-          clearTimeout(loadingTimeoutRef.current);
-        }
-      });
 
-      if (autoPlay) {
-        video.play()
-          .then(() => {
-            setIsPlaying(true);
-          })
-          .catch((err) => {
-            console.error('Direct stream: Autoplay failed', err);
-            setIsLoading(false);
-          });
+      console.log('Trying Video.js player...');
+      const proxiedUrl = getProxiedUrl(streamUrl);
+      
+      try {
+        const player = videojs(videoRef.current, {
+          controls: false,
+          autoplay: false,
+          preload: 'auto',
+          html5: {
+            vhs: {
+              overrideNative: true,
+              experimentalBufferBasedABR: true,
+            },
+          },
+          sources: [{
+            src: proxiedUrl,
+            type: 'video/mp2t'
+          }]
+        });
+
+        videojsRef.current = player;
+        let resolved = false;
+
+        const timeout = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            console.log('Video.js timeout');
+            player.dispose();
+            videojsRef.current = null;
+            resolve(false);
+          }
+        }, 10000);
+
+        player.on('canplay', () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('Video.js success!');
+            setCurrentPlayer('videojs');
+            
+            player.play()
+              .then(() => setIsPlaying(true))
+              .catch(() => {});
+            
+            resolve(true);
+          }
+        });
+
+        player.on('error', () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('Video.js error');
+            player.dispose();
+            videojsRef.current = null;
+            resolve(false);
+          }
+        });
+      } catch (error) {
+        console.log('Video.js initialization error:', error);
+        resolve(false);
       }
+    });
+  };
+
+  // Try native player
+  const tryNativePlayer = (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      if (!videoRef.current) {
+        resolve(false);
+        return;
+      }
+
+      console.log('Trying native player...');
+      const video = videoRef.current;
+      const proxiedUrl = getProxiedUrl(streamUrl);
+      
+      let resolved = false;
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          console.log('Native player timeout');
+          resolve(false);
+        }
+      }, 10000);
+
+      const onCanPlay = () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          console.log('Native player success!');
+          setCurrentPlayer('native');
+          
+          video.play()
+            .then(() => setIsPlaying(true))
+            .catch(() => {});
+          
+          video.removeEventListener('canplay', onCanPlay);
+          video.removeEventListener('error', onError);
+          resolve(true);
+        }
+      };
+
+      const onError = () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          console.log('Native player error');
+          video.removeEventListener('canplay', onCanPlay);
+          video.removeEventListener('error', onError);
+          resolve(false);
+        }
+      };
+
+      video.addEventListener('canplay', onCanPlay);
+      video.addEventListener('error', onError);
+      video.src = proxiedUrl;
+      video.load();
+    });
+  };
+
+  // Try all players sequentially
+  const tryPlayers = async () => {
+    cleanupPlayers();
+    setIsLoading(true);
+    setError(null);
+    
+    const strategies: Array<{ name: PlayerType, fn: () => Promise<boolean> }> = [
+      { name: 'hls', fn: tryHlsPlayer },
+      { name: 'videojs', fn: tryVideojsPlayer },
+      { name: 'native', fn: tryNativePlayer },
+    ];
+
+    const attempted: PlayerType[] = [];
+
+    for (const strategy of strategies) {
+      attempted.push(strategy.name);
+      setPlayerAttempts([...attempted]);
+      
+      console.log(`\n=== Trying ${strategy.name} player ===`);
+      const success = await strategy.fn();
+      
+      if (success) {
+        setIsLoading(false);
+        toast({
+          title: "Flux connecté",
+          description: `Lecture avec ${strategy.name} player`,
+        });
+        return;
+      }
+      
+      // Small delay between attempts
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
 
-    // Video element event listeners
-    const handlePlay = () => {
-      console.log('Video: Playing');
-      setIsPlaying(true);
-      setIsLoading(false);
-      if (loadingTimeoutRef.current) {
-        clearTimeout(loadingTimeoutRef.current);
-      }
-    };
+    // All players failed
+    console.error('All players failed');
+    setIsLoading(false);
+    setError('Impossible de lire ce flux avec tous les lecteurs disponibles. Le flux peut être incompatible ou indisponible.');
+    toast({
+      title: "Erreur de lecture",
+      description: "Tous les lecteurs ont échoué",
+      variant: "destructive",
+    });
+  };
 
-    const handlePause = () => {
-      console.log('Video: Paused');
-      setIsPlaying(false);
-    };
+  useEffect(() => {
+    tryPlayers();
 
-    const handleWaiting = () => {
-      console.log('Video: Waiting for data');
-      setIsLoading(true);
+    return () => {
+      cleanupPlayers();
     };
+  }, [streamUrl]);
 
-    const handleCanPlay = () => {
-      console.log('Video: Can play');
-      setIsLoading(false);
-      if (loadingTimeoutRef.current) {
-        clearTimeout(loadingTimeoutRef.current);
-      }
-    };
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
 
-    const handleError = (e: Event) => {
-      console.error('Video element error:', e);
-      const videoError = video.error;
-      if (videoError) {
-        console.error('Video error code:', videoError.code, 'message:', videoError.message);
-        setError(`Erreur de lecture: ${videoError.message}`);
-        setIsLoading(false);
-      }
-    };
+    const handlePlay = () => setIsPlaying(true);
+    const handlePause = () => setIsPlaying(false);
 
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
-    video.addEventListener('waiting', handleWaiting);
-    video.addEventListener('canplay', handleCanPlay);
-    video.addEventListener('error', handleError);
 
-    // Cleanup
     return () => {
-      if (loadingTimeoutRef.current) {
-        clearTimeout(loadingTimeoutRef.current);
-      }
-      
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('pause', handlePause);
-      video.removeEventListener('waiting', handleWaiting);
-      video.removeEventListener('canplay', handleCanPlay);
-      video.removeEventListener('error', handleError);
-      
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
     };
-  }, [streamUrl, autoPlay]);
+  }, []);
 
   useEffect(() => {
     const video = videoRef.current;
     if (video) {
       video.volume = isMuted ? 0 : volume;
       video.muted = isMuted;
+    }
+    if (videojsRef.current) {
+      videojsRef.current.volume(isMuted ? 0 : volume);
+      videojsRef.current.muted(isMuted);
     }
   }, [volume, isMuted]);
 
@@ -300,12 +354,18 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     const video = videoRef.current;
     if (!video) return;
     
-    if (isPlaying) {
-      video.pause();
+    if (videojsRef.current) {
+      if (isPlaying) {
+        videojsRef.current.pause();
+      } else {
+        videojsRef.current.play();
+      }
     } else {
-      video.play().catch((error: any) => {
-        console.log('Play failed:', error);
-      });
+      if (isPlaying) {
+        video.pause();
+      } else {
+        video.play().catch(() => {});
+      }
     }
   };
 
@@ -324,18 +384,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   };
 
   const handleRetry = () => {
-    setError(null);
-    setIsLoading(true);
-    const video = videoRef.current;
-    
-    if (video && hlsRef.current) {
-      const proxiedUrl = getProxiedUrl(streamUrl);
-      hlsRef.current.loadSource(proxiedUrl);
-      hlsRef.current.attachMedia(video);
-    } else if (video) {
-      video.src = getProxiedUrl(streamUrl);
-      video.load();
-    }
+    tryPlayers();
   };
 
   return (
@@ -345,19 +394,27 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       onMouseMove={handleMouseMove}
       onMouseLeave={() => isPlaying && setShowControls(false)}
     >
-      <video
-        ref={videoRef}
-        className="w-full h-full"
-        playsInline
-        controls={false}
-      />
+      <div data-vjs-player className="w-full h-full">
+        <video
+          ref={videoRef}
+          className="video-js vjs-default-skin w-full h-full"
+          playsInline
+        />
+      </div>
 
       {/* Loading Overlay */}
       {isLoading && !error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/90 backdrop-blur-sm z-10">
           <div className="flex flex-col items-center gap-4">
             <Loader2 className="w-12 h-12 text-primary animate-spin" />
-            <p className="text-sm text-muted-foreground">Connexion au flux...</p>
+            <div className="text-center">
+              <p className="text-sm text-white mb-2">Connexion au flux...</p>
+              {playerAttempts.length > 0 && (
+                <p className="text-xs text-gray-400">
+                  Essai: {playerAttempts.join(' → ')}
+                </p>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -370,13 +427,16 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
             <div className="space-y-2">
               <p className="text-sm font-semibold text-white">Impossible de charger le flux</p>
               <p className="text-xs text-gray-400">{error}</p>
+              <p className="text-xs text-gray-500 mt-2">
+                Lecteurs testés: {playerAttempts.join(', ')}
+              </p>
             </div>
             <Button
               onClick={handleRetry}
               variant="outline"
               className="mt-2"
             >
-              Réessayer
+              Réessayer tous les lecteurs
             </Button>
           </div>
         </div>
@@ -419,10 +479,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
           <div className="flex-1" />
 
-          {isPlaying && !isLoading && (
+          {isPlaying && !isLoading && currentPlayer && (
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
               <span className="text-xs text-red-500 font-semibold">● EN DIRECT</span>
+              <span className="text-xs text-gray-400 ml-2">({currentPlayer})</span>
             </div>
           )}
 
