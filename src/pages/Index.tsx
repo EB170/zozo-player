@@ -75,7 +75,7 @@ const Index = () => {
                 <SelectTrigger className="w-full bg-input border-border text-foreground font-medium">
                   <SelectValue placeholder="Sélectionner une chaîne..." />
                 </SelectTrigger>
-                <SelectContent className="bg-popover border-border max-h-[300px]">
+                <SelectContent className="bg-popover border-border max-h-[300px] z-[100]">
                   {PREDEFINED_CHANNELS.map(channel => <SelectItem key={channel.name} value={channel.name} className="cursor-pointer hover:bg-accent">
                       {channel.name}
                     </SelectItem>)}
