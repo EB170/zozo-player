@@ -165,6 +165,16 @@ export const VideoPlayerHybrid = ({
     const video = videoRef.current;
     if (!video) return;
     console.log('🎬 Creating MPEGTS player...');
+    
+    // Détection Mixed Content : si la page est HTTPS et l'URL est HTTP, utiliser le proxy
+    const isHttpsPage = window.location.protocol === 'https:';
+    const isHttpStream = streamUrl.toLowerCase().startsWith('http://');
+    
+    if (isHttpsPage && isHttpStream && !useProxyRef.current) {
+      console.log('🔒 Mixed Content detected, using proxy automatically');
+      useProxyRef.current = true;
+    }
+    
     const url = useProxyRef.current ? getProxiedUrl(streamUrl) : streamUrl;
     const player = mpegts.createPlayer({
       type: 'mpegts',
@@ -177,13 +187,16 @@ export const VideoPlayerHybrid = ({
       enableStashBuffer: true,
       stashInitialSize: getOptimalBufferSize(),
       autoCleanupSourceBuffer: true,
-      autoCleanupMaxBackwardDuration: 20,
-      autoCleanupMinBackwardDuration: 8,
+      autoCleanupMaxBackwardDuration: 30,     // Augmenté pour moins de nettoyages
+      autoCleanupMinBackwardDuration: 15,     // Plus de marge
       liveBufferLatencyChasing: networkSpeed === 'fast',
-      liveBufferLatencyMaxLatency: 5,
-      liveBufferLatencyMinRemain: 1,
+      liveBufferLatencyMaxLatency: 8,         // Tolérance augmentée
+      liveBufferLatencyMinRemain: 2,          // Plus de buffer de sécurité
       fixAudioTimestampGap: true,
-      lazyLoad: false
+      lazyLoad: false,
+      lazyLoadMaxDuration: 3 * 60,            // 3 min cache
+      lazyLoadRecoverDuration: 30,            // 30s recovery
+      deferLoadAfterSourceOpen: false
     });
     player.on(mpegts.Events.ERROR, (errorType: string, errorDetail: any) => {
       console.error('🔴 MPEGTS Error:', errorType, errorDetail);
