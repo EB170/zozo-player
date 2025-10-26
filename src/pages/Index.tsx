@@ -1,11 +1,10 @@
 import { useState } from "react";
 import { VideoPlayer } from "@/components/VideoPlayer";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { Video, Tv } from "lucide-react";
+import logo from "@/assets/zozoplayer.png";
 const PREDEFINED_CHANNELS = [{
   name: "Eurosport 1 FHD",
   url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=250665&extension=ts"
@@ -42,59 +41,33 @@ const PREDEFINED_CHANNELS = [{
 }];
 const Index = () => {
   const [streamUrl, setStreamUrl] = useState("");
-  const [activeUrl, setActiveUrl] = useState("");
-  const [urlInput, setUrlInput] = useState("");
   const [selectedChannel, setSelectedChannel] = useState("");
-  const handleLoadStream = () => {
-    if (!urlInput.trim()) {
-      toast.error("Veuillez entrer une URL de flux");
-      return;
-    }
-
-    // Basic URL validation
-    try {
-      new URL(urlInput);
-      setActiveUrl(urlInput);
-      setStreamUrl(urlInput);
-      toast.success("Flux chargé avec succès");
-    } catch {
-      toast.error("URL invalide");
-    }
-  };
+  
   const handleChannelSelect = (channelName: string) => {
     const channel = PREDEFINED_CHANNELS.find(ch => ch.name === channelName);
     if (channel) {
       setSelectedChannel(channelName);
-      setUrlInput(channel.url);
-      setActiveUrl(channel.url);
       setStreamUrl(channel.url);
       toast.success(`Chargement de ${channel.name}`);
-    }
-  };
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      handleLoadStream();
     }
   };
   return <div className="min-h-screen bg-background p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-8">
         {/* Header */}
         <div className="text-center space-y-4">
-          <div className="flex items-center justify-center gap-3 mb-2">
-            
-            
+          <div className="flex items-center justify-center mb-6">
+            <img src={logo} alt="ZozoPlayer" className="h-16 md:h-20 object-contain" />
           </div>
-          
         </div>
 
-        {/* Channel Selection & URL Input Card */}
+        {/* Channel Selection Card */}
         <Card className="p-6 bg-card border-border shadow-[var(--shadow-elevated)]">
           <div className="space-y-4">
-            {/* Predefined Channels Selector */}
+            {/* Sport Channels Selector */}
             <div className="space-y-2">
               <label className="text-sm font-medium text-foreground flex items-center gap-2">
                 <Tv className="w-4 h-4 text-primary" />
-                Chaînes prédéfinies
+                Chaînes de sport
               </label>
               <Select value={selectedChannel} onValueChange={handleChannelSelect}>
                 <SelectTrigger className="w-full bg-input border-border">
@@ -106,19 +79,6 @@ const Index = () => {
                     </SelectItem>)}
                 </SelectContent>
               </Select>
-            </div>
-
-            {/* Custom URL Input */}
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">
-                Ou entrez une URL personnalisée
-              </label>
-              <div className="flex flex-col sm:flex-row gap-3">
-                <Input type="text" placeholder="https://exemple.com/stream.m3u8 ou .ts" value={urlInput} onChange={e => setUrlInput(e.target.value)} onKeyPress={handleKeyPress} className="flex-1 bg-input border-border text-foreground placeholder:text-muted-foreground" />
-                <Button onClick={handleLoadStream} className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity shadow-lg">
-                  Charger le flux
-                </Button>
-              </div>
             </div>
 
             <p className="text-xs text-muted-foreground">
