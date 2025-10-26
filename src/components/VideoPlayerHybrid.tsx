@@ -243,23 +243,63 @@ export const VideoPlayerHybrid = ({ streamUrl, autoPlay = true }: VideoPlayerPro
 
     console.log('🎬 Creating HLS player...');
 
+    // Configuration ultra-optimisée pour LIVE avec zéro délai
     const hls = new Hls({
       debug: false,
       enableWorker: true,
-      lowLatencyMode: networkSpeed === 'fast',
-      backBufferLength: 20,
-      maxBufferLength: networkSpeed === 'fast' ? 30 : 20,
-      maxBufferSize: 60 * 1000 * 1000,
-      maxBufferHole: 0.5,
-      maxFragLookUpTolerance: 0.25,
-      liveSyncDurationCount: 3,
-      liveMaxLatencyDurationCount: networkSpeed === 'fast' ? 10 : 6,
-      manifestLoadingTimeOut: 10000,
-      fragLoadingTimeOut: 20000,
-      manifestLoadingMaxRetry: 4,
-      fragLoadingMaxRetry: 6,
-      startLevel: -1,
-      abrEwmaDefaultEstimate: 5000000,
+      
+      // ========== LOW LATENCY MODE ==========
+      lowLatencyMode: true, // TOUJOURS activé pour live
+      
+      // ========== BUFFER MINIMAL ==========
+      maxBufferLength: 4, // 4s max buffer (vs 30s avant) pour réduire délai
+      maxMaxBufferLength: 10, // Cap absolu à 10s
+      maxBufferSize: 20 * 1000 * 1000, // 20MB max
+      maxBufferHole: 0.1, // Tolérance trou de 100ms seulement
+      
+      // ========== LIVE SYNC AGRESSIF ==========
+      liveSyncDurationCount: 2, // Rester à 2 segments du live (vs 3)
+      liveMaxLatencyDurationCount: 4, // Max 4 segments de retard (vs 6-10)
+      liveDurationInfinity: false,
+      
+      // ========== BACK BUFFER MINIMAL ==========
+      backBufferLength: 5, // Garder seulement 5s en arrière (vs 20s)
+      
+      // ========== CHARGEMENT RAPIDE ==========
+      manifestLoadingTimeOut: 5000, // 5s timeout (vs 10s)
+      fragLoadingTimeOut: 8000, // 8s timeout (vs 20s)
+      levelLoadingTimeOut: 5000,
+      manifestLoadingMaxRetry: 2, // Moins de retry, plus rapide
+      levelLoadingMaxRetry: 2,
+      fragLoadingMaxRetry: 3,
+      
+      // ========== ABR ULTRA-RÉACTIF ==========
+      abrEwmaFastLive: 2, // Réaction rapide (vs 3)
+      abrEwmaSlowLive: 5, // Adaptation rapide (vs 9)
+      abrBandWidthFactor: 0.9, // 90% de la BP estimée
+      abrBandWidthUpFactor: 0.8, // Monter facilement en qualité
+      abrMaxWithRealBitrate: true, // Utiliser bitrate réel
+      minAutoBitrate: 0,
+      
+      // ========== STALL & RETRY AGRESSIFS ==========
+      maxStarvationDelay: 2, // 2s max avant action
+      maxLoadingDelay: 2,
+      highBufferWatchdogPeriod: 1, // Check toutes les 1s
+      nudgeOffset: 0.05, // Nudge plus fin
+      nudgeMaxRetry: 15, // Plus de tentatives
+      
+      // ========== PRÉCHARGEMENT ==========
+      startLevel: -1, // Auto-start
+      autoStartLoad: true,
+      startPosition: -1, // Démarrer au live
+      
+      // ========== PERFORMANCE ==========
+      maxFragLookUpTolerance: 0.1, // Tolérance recherche fragment
+      progressive: true, // Lecture progressive
+      
+      // ========== LATENCE CHASING ==========
+      // Permet de rattraper le live si on prend du retard
+      maxLiveSyncPlaybackRate: 1.05, // Jouer à 105% max pour rattraper
     });
 
     hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
