@@ -62,16 +62,34 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
     try {
       if (isHLS && Hls.isSupported()) {
-        // HLS streaming
+        // HLS streaming with aggressive recovery settings
         const hls = new Hls({
           enableWorker: true,
+          autoStartLoad: true,
+          startFragPrefetch: true,
           lowLatencyMode: true,
           backBufferLength: 10,
-          maxBufferLength: 30,
-          maxMaxBufferLength: 60,
+          maxBufferLength: 20,
+          maxMaxBufferLength: 40,
+          liveSyncDuration: 6,
           liveSyncDurationCount: 3,
           liveMaxLatencyDurationCount: 10,
           liveDurationInfinity: true,
+          maxLoadingDelay: 4,
+          maxBufferHole: 0.5,
+          highBufferWatchdogPeriod: 2,
+          nudgeOffset: 0.1,
+          nudgeMaxRetry: 10,
+          maxFragLookUpTolerance: 0.25,
+          manifestLoadingTimeOut: 20000,
+          manifestLoadingMaxRetry: 6,
+          manifestLoadingRetryDelay: 1000,
+          levelLoadingTimeOut: 20000,
+          levelLoadingMaxRetry: 6,
+          levelLoadingRetryDelay: 1000,
+          fragLoadingTimeOut: 40000,
+          fragLoadingMaxRetry: 10,
+          fragLoadingRetryDelay: 1000,
         });
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -84,19 +102,37 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         });
 
         hls.on(Hls.Events.ERROR, (event, data) => {
+          console.log("HLS Error:", data.type, data.details, data.fatal);
+          
           if (data.fatal) {
             switch (data.type) {
               case Hls.ErrorTypes.NETWORK_ERROR:
-                setError("Erreur réseau - reconnexion...");
-                attemptReconnect();
+                console.log("Network error - attempting recovery");
+                hls.startLoad();
+                setTimeout(() => {
+                  if (hls) attemptReconnect();
+                }, 2000);
                 break;
               case Hls.ErrorTypes.MEDIA_ERROR:
+                console.log("Media error - attempting recovery");
                 hls.recoverMediaError();
+                setTimeout(() => {
+                  if (videoRef.current && videoRef.current.paused) {
+                    videoRef.current.play().catch(() => {});
+                  }
+                }, 1000);
                 break;
               default:
-                setError("Erreur fatale de lecture");
-                setStatus("error");
+                console.log("Fatal error - full reconnect");
+                attemptReconnect();
                 break;
+            }
+          } else {
+            // Non-fatal errors - try to recover silently
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              hls.recoverMediaError();
+            } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              hls.startLoad();
             }
           }
         });
@@ -105,7 +141,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         hls.attachMedia(video);
         hlsRef.current = hls;
       } else if (isTS && mpegts.isSupported()) {
-        // MPEG-TS streaming
+        // MPEG-TS streaming with optimized settings
         const player = mpegts.createPlayer({
           type: "mpegts",
           isLive: true,
@@ -114,17 +150,30 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           enableWorker: true,
           enableStashBuffer: false,
           stashInitialSize: 128,
+          autoCleanupSourceBuffer: true,
+          autoCleanupMaxBackwardDuration: 10,
+          autoCleanupMinBackwardDuration: 5,
           liveBufferLatencyChasing: true,
           liveBufferLatencyMaxLatency: 3,
           liveBufferLatencyMinRemain: 0.5,
+          liveSync: true,
+          lazyLoad: false,
+          lazyLoadMaxDuration: 3 * 60,
+          lazyLoadRecoverDuration: 30,
+          deferLoadAfterSourceOpen: false,
         });
 
         player.attachMediaElement(video);
         player.load();
 
         player.on(mpegts.Events.ERROR, (errorType: string, errorDetail: string) => {
-          setError(`Erreur TS: ${errorDetail} - reconnexion...`);
-          attemptReconnect();
+          console.log("MPEG-TS Error:", errorType, errorDetail);
+          // Auto-recovery for all errors
+          setTimeout(() => {
+            if (mpegtsRef.current) {
+              attemptReconnect();
+            }
+          }, 2000);
         });
 
         if (autoPlay) {
@@ -174,20 +223,29 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     };
 
     const handleError = () => {
-      setError("Erreur de lecture - reconnexion...");
-      attemptReconnect();
+      console.log("Video element error - attempting reconnect");
+      setTimeout(() => attemptReconnect(), 2000);
+    };
+
+    const handleStalled = () => {
+      console.log("Video stalled - forcing play");
+      if (video.paused && status === "playing") {
+        video.play().catch(() => {});
+      }
     };
 
     video.addEventListener("play", handlePlay);
     video.addEventListener("pause", handlePause);
     video.addEventListener("waiting", handleWaiting);
     video.addEventListener("error", handleError);
+    video.addEventListener("stalled", handleStalled);
 
     return () => {
       video.removeEventListener("play", handlePlay);
       video.removeEventListener("pause", handlePause);
       video.removeEventListener("waiting", handleWaiting);
       video.removeEventListener("error", handleError);
+      video.removeEventListener("stalled", handleStalled);
     };
   }, []);
 
@@ -249,23 +307,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         playsInline
       />
 
-      {/* Status Overlay */}
-      {(status === "loading" || status === "error") && (
+      {/* Status Overlay - Only show loading, auto-hide errors */}
+      {status === "loading" && (
         <div className="absolute inset-0 flex items-center justify-center bg-[hsl(var(--player-bg))]/90 backdrop-blur-sm">
-          {status === "loading" ? (
-            <div className="flex flex-col items-center gap-4">
-              <Loader2 className="w-12 h-12 text-primary animate-spin" />
-              <p className="text-sm text-muted-foreground">Chargement du flux...</p>
-            </div>
-          ) : (
-            <div className="flex flex-col items-center gap-4 px-6 text-center">
-              <AlertCircle className="w-12 h-12 text-destructive" />
-              <p className="text-sm text-destructive">{error}</p>
-              <Button onClick={initializePlayer} variant="outline" size="sm">
-                Réessayer
-              </Button>
-            </div>
-          )}
+          <div className="flex flex-col items-center gap-4">
+            <Loader2 className="w-12 h-12 text-primary animate-spin" />
+            <p className="text-sm text-muted-foreground">Connexion au flux...</p>
+          </div>
         </div>
       )}
 
