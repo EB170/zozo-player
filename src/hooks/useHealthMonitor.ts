@@ -50,13 +50,15 @@ export const useHealthMonitor = (
   ): number => {
     let score = 100;
 
-    // Penalité buffer (40 points max)
-    if (bufferLevel < config.criticalBufferLevel) {
-      score -= 40;
-    } else if (bufferLevel < config.warningBufferLevel) {
-      score -= 20;
+    // Penalité buffer (40 points max) - adapté pour live streaming
+    if (bufferLevel < 0.5) {
+      score -= 40; // Critique absolu
+    } else if (bufferLevel < config.criticalBufferLevel) { // 1s
+      score -= 25; // Critique mais tolérable pour live
+    } else if (bufferLevel < config.warningBufferLevel) { // 3s
+      score -= 15; // Warning léger
     } else if (bufferLevel < 5) {
-      score -= 10;
+      score -= 5; // Optimal pour live
     }
 
     // Penalité dropped frames (30 points max)
@@ -68,12 +70,12 @@ export const useHealthMonitor = (
       score -= 5;
     }
 
-    // Penalité stalls (20 points max)
-    if (stallCount > 5) {
+    // Penalité stalls (20 points max) - plus tolérant
+    if (stallCount > 8) {
       score -= 20;
-    } else if (stallCount > 2) {
+    } else if (stallCount > 4) {
       score -= 10;
-    } else if (stallCount > 0) {
+    } else if (stallCount > 1) {
       score -= 5;
     }
 

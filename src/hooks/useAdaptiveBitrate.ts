@@ -114,7 +114,8 @@ export const useAdaptiveBitrate = (
       if (healthScore < 70) {
         return { should: false, reason: 'Santé insuffisante pour upgrade' };
       }
-      if (stableCountRef.current < 3) {
+      // ✅ Réduit de 3 à 2 checks pour upgrade plus réactif
+      if (stableCountRef.current < 2) {
         return { should: false, reason: 'Conditions pas encore stables' };
       }
       return { should: true, reason: 'Conditions optimales - upgrade' };
@@ -163,7 +164,9 @@ export const useAdaptiveBitrate = (
             lastSwitchTimeRef.current = Date.now();
             stableCountRef.current = 0;
 
-            console.log(`🎯 ABR Switch: ${prev.currentQuality?.label || 'none'} → ${optimalQuality.label} (${reason})`);
+            if (import.meta.env.DEV) {
+              console.log(`🎯 ABR Switch: ${prev.currentQuality?.label || 'none'} → ${optimalQuality.label} (${reason})`);
+            }
 
             return {
               currentQuality: optimalQuality,

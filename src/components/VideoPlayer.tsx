@@ -159,24 +159,65 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     cleanupPlayer(mpegts2Ref, hls2Ref);
   };
 
-  // ABR automatique - appliquer les changements de qualité (sauf pendant recovery)
+  // ABR automatique - appliquer les changements de qualité avec reload effectif
   useEffect(() => {
     if (errorRecovery.errorState.isRecovering) {
-      console.log('⏸️ ABR paused during recovery');
+      if (import.meta.env.DEV) {
+        console.log('⏸️ ABR paused during recovery');
+      }
       return;
     }
     
-    if (abrState.currentQuality && quality === 'auto' && playerTypeRef.current === 'hls') {
-      console.log(`🎬 ABR applying quality: ${abrState.currentQuality.label}`);
-      // Trigger reload avec nouvelle qualité
-      if (!isTransitioning) {
-        toast.info(`📊 ABR: ${abrState.currentQuality.label}`, {
-          description: abrState.adaptationReason,
-          duration: 2000,
-        });
+    if (abrState.currentQuality && quality === 'auto' && playerTypeRef.current === 'hls' && availableQualities.length > 0) {
+      const targetQuality = availableQualities.find(q => 
+        q.bandwidth === abrState.currentQuality?.bandwidth
+      );
+      
+      if (targetQuality && targetQuality.url) {
+        if (import.meta.env.DEV) {
+          console.log(`🎬 ABR applying quality: ${targetQuality.label} (${targetQuality.url})`);
+        }
+        
+        // Forcer le changement de qualité en recréant le player HLS avec nouvelle URL
+        const activeVideo = getActiveVideo();
+        if (activeVideo && !isTransitioning) {
+          const currentTime = activeVideo.currentTime;
+          const wasPlaying = !activeVideo.paused;
+          
+          // Cleanup ancien player
+          const activeRefs = activeVideoRef.current === 1 
+            ? { mpegts: mpegts1Ref, hls: hls1Ref }
+            : { mpegts: mpegts2Ref, hls: hls2Ref };
+          
+          cleanupPlayer(activeRefs.mpegts, activeRefs.hls);
+          
+          // Créer nouveau player avec URL de la qualité cible
+          const newHls = new Hls({
+            debug: false,
+            enableWorker: true,
+            lowLatencyMode: networkSpeedRef.current === 'fast',
+            maxBufferLength: 60,
+          });
+          
+          newHls.loadSource(getProxiedUrl(targetQuality.url));
+          newHls.attachMedia(activeVideo);
+          
+          activeRefs.hls.current = newHls;
+          
+          // Restaurer position et lecture
+          activeVideo.currentTime = currentTime;
+          if (wasPlaying) {
+            activeVideo.play();
+          }
+          
+          toast.info(`📊 Qualité adaptée: ${targetQuality.label}`, {
+            description: abrState.adaptationReason,
+            duration: 2000,
+          });
+        }
       }
     }
-  }, [abrState.currentQuality, quality, isTransitioning, errorRecovery.errorState.isRecovering]);
+  }, [abrState.currentQuality, quality, isTransitioning, errorRecovery.errorState.isRecovering, availableQualities]);
 
   // Monitoring health et alertes
   useEffect(() => {
@@ -273,19 +314,25 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     });
 
     player.on(mpegts.Events.ERROR, (errorType: string, errorDetail: any) => {
-      console.error('🔴 MPEGTS Error:', errorType, errorDetail);
+      if (import.meta.env.DEV) {
+        console.error('🔴 MPEGTS Error:', errorType, errorDetail);
+      }
       errorRecovery.recordError(`MPEGTS: ${errorType}`);
       
       if (!useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
         useProxyRef.current = true;
-        console.log('🔄 Switching to proxy...');
+        if (import.meta.env.DEV) {
+          console.log('🔄 Switching to proxy...');
+        }
         toast.info("🔄 Basculement vers proxy");
         errorRecovery.attemptRecovery(() => initDoubleBuffer()).catch(err => {
           console.error('Failed to recover with proxy:', err);
         });
       } else if (useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
         playerTypeRef.current = 'hls';
-        console.log('🔄 Switching to HLS...');
+        if (import.meta.env.DEV) {
+          console.log('🔄 Switching to HLS...');
+        }
         toast.info("🔄 Basculement vers HLS");
         errorRecovery.attemptRecovery(() => initDoubleBuffer()).catch(err => {
           console.error('Failed to recover with HLS:', err);
@@ -343,21 +390,29 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
     hls.on(Hls.Events.ERROR, (event, data) => {
       if (data.fatal) {
-        console.error('🔴 HLS Fatal Error:', data.type, data.details);
+        if (import.meta.env.DEV) {
+          console.error('🔴 HLS Fatal Error:', data.type, data.details);
+        }
         errorRecovery.recordError(`HLS: ${data.type} - ${data.details}`);
         
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          console.log('🔄 Attempting HLS network recovery...');
+          if (import.meta.env.DEV) {
+            console.log('🔄 Attempting HLS network recovery...');
+          }
           errorRecovery.attemptRecovery(() => {
             hls.startLoad();
           }).catch(err => console.error('HLS network recovery failed:', err));
         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-          console.log('🔄 Attempting HLS media recovery...');
+          if (import.meta.env.DEV) {
+            console.log('🔄 Attempting HLS media recovery...');
+          }
           errorRecovery.attemptRecovery(() => {
             hls.recoverMediaError();
           }).catch(err => console.error('HLS media recovery failed:', err));
         } else {
-          console.log('🔄 Switching back to MPEGTS...');
+          if (import.meta.env.DEV) {
+            console.log('🔄 Switching back to MPEGTS...');
+          }
           playerTypeRef.current = 'mpegts';
           errorRecovery.attemptRecovery(() => initDoubleBuffer()).catch(err => {
             console.error('Failed to switch to MPEGTS:', err);
@@ -395,7 +450,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     if (!activeVideo || !nextVideo || isTransitioning) return;
     
     setIsTransitioning(true);
-    console.log(`🔄 Buffer switch: ${activeVideoRef.current} → ${activeVideoRef.current === 1 ? 2 : 1}`);
+    if (import.meta.env.DEV) {
+      console.log(`🔄 Buffer switch: ${activeVideoRef.current} → ${activeVideoRef.current === 1 ? 2 : 1}`);
+    }
     
     // Cleanup l'ancien player du next buffer avant de créer un nouveau
     const nextRefs = getNextPlayerRefs();
@@ -442,7 +499,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const initDoubleBuffer = useCallback(() => {
     if (!video1Ref.current || !video2Ref.current) return;
     
-    console.log('🎬 Initializing double buffer...');
+    if (import.meta.env.DEV) {
+      console.log('🎬 Initializing double buffer...');
+    }
     cleanup();
     setIsLoading(true);
     errorRecovery.reset(); // Reset error state on new init
@@ -455,11 +514,15 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     
     if (autoPlay) {
       const attemptPlay = () => {
-        console.log('▶️ Attempting playback...');
+        if (import.meta.env.DEV) {
+          console.log('▶️ Attempting playback...');
+        }
         video1.play().then(() => {
           setIsPlaying(true);
           setIsLoading(false);
-          console.log('✅ Playback started successfully');
+          if (import.meta.env.DEV) {
+            console.log('✅ Playback started successfully');
+          }
           toast.success("✅ Lecture démarrée", {
             description: `${playerTypeRef.current.toUpperCase()} • ${networkSpeedRef.current}`,
             duration: 2000,
@@ -469,7 +532,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           setTimeout(() => {
             const video2 = video2Ref.current;
             if (video2) {
-              console.log('🔄 Preparing backup buffer...');
+              if (import.meta.env.DEV) {
+                console.log('🔄 Preparing backup buffer...');
+              }
               video2.style.opacity = '0';
               video2.style.zIndex = '2';
               prepareVideo(video2, { mpegts: mpegts2Ref, hls: hls2Ref });
@@ -479,7 +544,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           console.error('❌ Playback failed:', err);
           
           if (errorRecovery.canRetry) {
-            console.log('🔄 Retrying playback...');
+            if (import.meta.env.DEV) {
+              console.log('🔄 Retrying playback...');
+            }
             errorRecovery.attemptRecovery(attemptPlay).catch((recErr) => {
               console.error('❌ Recovery failed completely:', recErr);
               setIsLoading(false);
@@ -562,11 +629,15 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     else if (bandwidth > 2) interval = 20000; // Connexion moyenne
     else interval = 30000; // Connexion faible
     
-    console.log(`⏱️ Auto-switch interval: ${interval/1000}s (real bandwidth: ${bandwidth.toFixed(2)} Mbps)`);
+    if (import.meta.env.DEV) {
+      console.log(`⏱️ Auto-switch interval: ${interval/1000}s (real bandwidth: ${bandwidth.toFixed(2)} Mbps)`);
+    }
     
     switchTimerRef.current = setInterval(() => {
       if (!isTransitioning) {
-        console.log(`🔄 Auto switch planifié (${interval/1000}s)`);
+        if (import.meta.env.DEV) {
+          console.log(`🔄 Auto switch planifié (${interval/1000}s)`);
+        }
         switchToNext();
       }
     }, interval);
@@ -858,11 +929,65 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         quality={quality}
         onQualityChange={(newQuality) => {
           setQuality(newQuality);
-          console.log(`🎬 Quality changed to: ${newQuality}`);
-          toast.info(`Qualité: ${newQuality}`, {
-            description: availableQualities.length > 0 ? 'Changement appliqué' : 'Mode adaptatif',
-            duration: 2000,
-          });
+          
+          if (import.meta.env.DEV) {
+            console.log(`🎬 Manual quality change to: ${newQuality}`);
+          }
+          
+          // Si changement manuel vers une qualité spécifique, forcer le reload
+          if (newQuality !== 'auto' && availableQualities.length > 0) {
+            const targetQuality = availableQualities.find(q => {
+              const label = q.label.toLowerCase();
+              return (
+                (newQuality === 'high' && label.includes('1080')) ||
+                (newQuality === 'medium' && label.includes('720')) ||
+                (newQuality === 'low' && label.includes('480'))
+              );
+            });
+            
+            if (targetQuality?.url && playerTypeRef.current === 'hls') {
+              const activeVideo = getActiveVideo();
+              if (activeVideo) {
+                const currentTime = activeVideo.currentTime;
+                const wasPlaying = !activeVideo.paused;
+                
+                // Cleanup et reload avec nouvelle qualité
+                const activeRefs = activeVideoRef.current === 1 
+                  ? { mpegts: mpegts1Ref, hls: hls1Ref }
+                  : { mpegts: mpegts2Ref, hls: hls2Ref };
+                
+                cleanupPlayer(activeRefs.mpegts, activeRefs.hls);
+                
+                const newHls = new Hls({
+                  debug: false,
+                  enableWorker: true,
+                  lowLatencyMode: true,
+                  maxBufferLength: 60,
+                });
+                
+                newHls.loadSource(getProxiedUrl(targetQuality.url));
+                newHls.attachMedia(activeVideo);
+                activeRefs.hls.current = newHls;
+                
+                activeVideo.currentTime = currentTime;
+                if (wasPlaying) {
+                  activeVideo.play();
+                }
+                
+                toast.success(`✅ Qualité changée: ${targetQuality.label}`);
+              }
+            } else {
+              toast.info(`Qualité: ${newQuality}`, {
+                description: availableQualities.length > 0 ? 'Changement appliqué' : 'Mode adaptatif',
+                duration: 2000,
+              });
+            }
+          } else {
+            toast.info(`Qualité: ${newQuality}`, {
+              description: 'Adaptation automatique activée',
+              duration: 2000,
+            });
+          }
         }}
         isVisible={showSettings}
         onClose={() => setShowSettings(false)}

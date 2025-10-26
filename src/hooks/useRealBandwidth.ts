@@ -28,16 +28,23 @@ export const useRealBandwidth = () => {
         for (const entry of entries) {
           const resource = entry as PerformanceResourceTiming;
           
-          // Filtrer uniquement les ressources vidéo
-          if (
-            resource.name.includes('stream') ||
-            resource.name.includes('video') ||
-            resource.name.includes('segment') ||
-            resource.name.includes('.ts') ||
-            resource.name.includes('.m4s') ||
-            resource.name.includes('.mp4') ||
-            resource.name.includes('.m3u8')
-          ) {
+          // Filtrage amélioré - capture plus large de ressources vidéo
+          const url = resource.name.toLowerCase();
+          const isVideoResource = 
+            url.includes('stream') ||
+            url.includes('video') ||
+            url.includes('segment') ||
+            url.includes('chunk') ||
+            url.includes('media') ||
+            url.includes('.ts') ||
+            url.includes('.m4s') ||
+            url.includes('.mp4') ||
+            url.includes('.m3u8') ||
+            url.includes('.mpd') ||
+            // Détection par content-type si disponible
+            (resource.transferSize > 10000); // Plus de 10KB = probablement vidéo
+          
+          if (isVideoResource) {
             const bytes = resource.transferSize || resource.encodedBodySize || 0;
             
             if (bytes > 0) {
@@ -117,7 +124,9 @@ export const useRealBandwidth = () => {
       });
 
       if (currentBitrate > 0) {
-        console.log(`📊 Real Bandwidth: ${currentBitrate.toFixed(2)} Mbps (avg: ${averageBitrate.toFixed(2)}, trend: ${trend})`);
+        if (import.meta.env.DEV) {
+          console.log(`📊 Real Bandwidth: ${currentBitrate.toFixed(2)} Mbps (avg: ${averageBitrate.toFixed(2)}, trend: ${trend})`);
+        }
       }
     }, 2000);
 
