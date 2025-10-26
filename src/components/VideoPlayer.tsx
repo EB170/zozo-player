@@ -41,6 +41,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   
   const switchTimerRef = useRef<NodeJS.Timeout | null>(null);
   const healthCheckRef = useRef<NodeJS.Timeout | null>(null);
+  const syncTimerRef = useRef<NodeJS.Timeout | null>(null);
   const useProxyRef = useRef(false);
   const playerTypeRef = useRef<'mpegts' | 'hls'>('mpegts');
   const lastTimeRef = useRef(0);
@@ -49,6 +50,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const lastTapTimeRef = useRef(0);
   const lastTapSideRef = useRef<'left' | 'right' | null>(null);
   const playPromiseRef = useRef<Promise<void> | null>(null);
+  const isBuffer2ReadyRef = useRef(false);
   
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -156,6 +158,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       healthCheckRef.current = null;
     }
     
+    if (syncTimerRef.current) {
+      clearInterval(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+    
     cleanupPlayer(mpegts1Ref, hls1Ref);
     cleanupPlayer(mpegts2Ref, hls2Ref);
   };
@@ -185,7 +192,10 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           const currentTime = activeVideo.currentTime;
           const wasPlaying = !activeVideo.paused;
           
-          // Cleanup ancien player
+          // Marquer le backup comme non-prêt pendant le changement
+          isBuffer2ReadyRef.current = false;
+          
+          // Cleanup ancien player actif
           const activeRefs = activeVideoRef.current === 1 
             ? { mpegts: mpegts1Ref, hls: hls1Ref }
             : { mpegts: mpegts2Ref, hls: hls2Ref };
@@ -214,6 +224,52 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
               }
             });
           }
+          
+          // Recréer le buffer backup avec la nouvelle qualité après 1s
+          setTimeout(() => {
+            const backupVideo = getNextVideo();
+            const backupRefs = getNextPlayerRefs();
+            
+            if (backupVideo) {
+              if (import.meta.env.DEV) {
+                console.log('🔄 Recreating backup buffer with new quality...');
+              }
+              
+              // Cleanup ancien backup
+              cleanupPlayer(backupRefs.mpegts, backupRefs.hls);
+              
+              // Créer nouveau backup avec même qualité
+              backupVideo.volume = 0;
+              backupVideo.muted = true;
+              
+              const backupHls = new Hls({
+                debug: false,
+                enableWorker: true,
+                lowLatencyMode: networkSpeedRef.current === 'fast',
+                maxBufferLength: 60,
+              });
+              
+              backupHls.loadSource(getProxiedUrl(targetQuality.url));
+              backupHls.attachMedia(backupVideo);
+              backupRefs.hls.current = backupHls;
+              
+              // Attendre que le backup soit prêt
+              const checkReady = setInterval(() => {
+                if (backupVideo.readyState >= 2) {
+                  clearInterval(checkReady);
+                  backupVideo.currentTime = activeVideo.currentTime;
+                  backupVideo.play().catch(() => {});
+                  isBuffer2ReadyRef.current = true;
+                  
+                  if (import.meta.env.DEV) {
+                    console.log('✅ Backup buffer recreated with new quality');
+                  }
+                }
+              }, 100);
+              
+              setTimeout(() => clearInterval(checkReady), 2000);
+            }
+          }, 1000);
           
           toast.info(`📊 Qualité adaptée: ${targetQuality.label}`, {
             description: abrState.adaptationReason,
@@ -448,72 +504,110 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     }
   };
 
+  // Synchronisation continue du buffer backup
+  const startBufferSync = useCallback(() => {
+    if (syncTimerRef.current) {
+      clearInterval(syncTimerRef.current);
+    }
+    
+    syncTimerRef.current = setInterval(() => {
+      const activeVideo = getActiveVideo();
+      const nextVideo = getNextVideo();
+      
+      if (!activeVideo || !nextVideo || !isBuffer2ReadyRef.current) return;
+      
+      // Synchroniser le buffer backup avec le principal (tolérance de 2s)
+      const timeDiff = Math.abs(nextVideo.currentTime - activeVideo.currentTime);
+      if (timeDiff > 2 && !isTransitioning) {
+        nextVideo.currentTime = activeVideo.currentTime;
+        if (import.meta.env.DEV) {
+          console.log(`⏱️ Buffer sync: corrected ${timeDiff.toFixed(2)}s drift`);
+        }
+      }
+      
+      // Vérifier que le buffer backup est en lecture silencieuse
+      if (nextVideo.paused && activeVideo.readyState >= 2) {
+        nextVideo.play().catch(() => {
+          // Silencieux - le backup reste prêt
+        });
+      }
+    }, 500);
+  }, [isTransitioning]);
+
   const switchToNext = useCallback(() => {
     const activeVideo = getActiveVideo();
     const nextVideo = getNextVideo();
     
-    if (!activeVideo || !nextVideo || isTransitioning) return;
+    if (!activeVideo || !nextVideo || isTransitioning || !isBuffer2ReadyRef.current) {
+      if (import.meta.env.DEV) {
+        console.warn('⚠️ Switch aborted - backup buffer not ready');
+      }
+      return;
+    }
+    
+    // Vérifier que le backup est prêt AVANT de switcher
+    if (nextVideo.readyState < 2) {
+      if (import.meta.env.DEV) {
+        console.warn('⚠️ Backup buffer not ready (readyState:', nextVideo.readyState, ')');
+      }
+      return;
+    }
     
     setIsTransitioning(true);
     if (import.meta.env.DEV) {
-      console.log(`🔄 Buffer switch: ${activeVideoRef.current} → ${activeVideoRef.current === 1 ? 2 : 1}`);
+      console.log(`🔄 Instant buffer switch: ${activeVideoRef.current} → ${activeVideoRef.current === 1 ? 2 : 1}`);
     }
     
-    // Cleanup l'ancien player du next buffer avant de créer un nouveau
-    const nextRefs = getNextPlayerRefs();
-    cleanupPlayer(nextRefs.mpegts, nextRefs.hls);
+    // Synchroniser position exacte
+    nextVideo.currentTime = activeVideo.currentTime;
+    nextVideo.playbackRate = playbackRate;
+    nextVideo.volume = volume;
+    nextVideo.muted = isMuted;
     
-    // Créer nouveau player
-    prepareVideo(nextVideo, nextRefs);
+    // Assurer que le backup est en lecture
+    if (nextVideo.paused) {
+      playPromiseRef.current = nextVideo.play().catch(err => {
+        if (err.name !== 'AbortError') {
+          console.error('Switch play error:', err);
+        }
+      });
+    }
     
-    let checkTimeout: NodeJS.Timeout;
-    const checkReady = setInterval(() => {
-      if (nextVideo.readyState >= 2) {
-        clearInterval(checkReady);
-        clearTimeout(checkTimeout);
-        
-        nextVideo.currentTime = activeVideo.currentTime;
-        nextVideo.playbackRate = playbackRate;
-        playPromiseRef.current = nextVideo.play().then(() => {
-          // Transition fluide
-          activeVideo.style.opacity = '0';
-          nextVideo.style.opacity = '1';
-          nextVideo.style.zIndex = '3';
-          activeVideo.style.zIndex = '1';
-          
-          setTimeout(() => {
-            // Attendre la fin de la promise play avant de pause
-            if (playPromiseRef.current) {
-              playPromiseRef.current.then(() => {
-                activeVideo.pause();
-                playPromiseRef.current = null;
-              }).catch(() => {
-                activeVideo.pause();
-                playPromiseRef.current = null;
-              });
-            } else {
-              activeVideo.pause();
-            }
-            activeVideoRef.current = activeVideoRef.current === 1 ? 2 : 1;
-            setIsTransitioning(false);
-            errorRecovery.reset();
-          }, 300);
-        }).catch(err => {
-          if (err.name !== 'AbortError') {
-            console.error('Switch playback error:', err);
-          }
-          setIsTransitioning(false);
+    // Transition instantanée
+    activeVideo.style.opacity = '0';
+    nextVideo.style.opacity = '1';
+    nextVideo.style.zIndex = '3';
+    activeVideo.style.zIndex = '1';
+    
+    // Pause l'ancien après transition
+    setTimeout(() => {
+      if (playPromiseRef.current) {
+        playPromiseRef.current.then(() => {
+          activeVideo.pause();
+          activeVideo.volume = 0;
+          activeVideo.muted = true;
+          playPromiseRef.current = null;
+        }).catch(() => {
+          activeVideo.pause();
+          activeVideo.volume = 0;
+          activeVideo.muted = true;
           playPromiseRef.current = null;
         });
+      } else {
+        activeVideo.pause();
+        activeVideo.volume = 0;
+        activeVideo.muted = true;
       }
-    }, 50);
-    
-    checkTimeout = setTimeout(() => {
-      clearInterval(checkReady);
+      
+      activeVideoRef.current = activeVideoRef.current === 1 ? 2 : 1;
       setIsTransitioning(false);
-      console.warn('Switch timeout - buffer not ready');
-    }, 5000);
-  }, [playbackRate, isTransitioning]);
+      errorRecovery.reset();
+      
+      if (import.meta.env.DEV) {
+        console.log('✅ Buffer switch complete');
+      }
+    }, 300);
+  }, [playbackRate, isTransitioning, volume, isMuted]);
 
   const initDoubleBuffer = useCallback(() => {
     if (!video1Ref.current || !video2Ref.current) return;
@@ -547,18 +641,51 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
             duration: 2000,
           });
           
-          // Préparer video 2 après 3s
+          // Préparer buffer 2 IMMÉDIATEMENT pour transitions seamless
           setTimeout(() => {
             const video2 = video2Ref.current;
             if (video2) {
               if (import.meta.env.DEV) {
-                console.log('🔄 Preparing backup buffer...');
+                console.log('🔄 Preparing backup buffer (immediate)...');
               }
               video2.style.opacity = '0';
               video2.style.zIndex = '2';
+              video2.volume = 0; // Silencieux pour le backup
+              video2.muted = true;
               prepareVideo(video2, { mpegts: mpegts2Ref, hls: hls2Ref });
+              
+              // Attendre que buffer 2 soit prêt
+              const checkBackupReady = setInterval(() => {
+                if (video2.readyState >= 2) {
+                  clearInterval(checkBackupReady);
+                  isBuffer2ReadyRef.current = true;
+                  
+                  // Synchroniser position initiale
+                  video2.currentTime = video1.currentTime;
+                  
+                  // Lancer en lecture silencieuse
+                  video2.play().catch(() => {
+                    // Backup en attente
+                  });
+                  
+                  // Démarrer la synchronisation continue
+                  startBufferSync();
+                  
+                  if (import.meta.env.DEV) {
+                    console.log('✅ Backup buffer ready and synced');
+                  }
+                }
+              }, 100);
+              
+              // Timeout de sécurité
+              setTimeout(() => {
+                clearInterval(checkBackupReady);
+                if (!isBuffer2ReadyRef.current) {
+                  console.warn('⚠️ Backup buffer preparation timeout');
+                }
+              }, 2000);
             }
-          }, 3000);
+          }, 500); // 500ms au lieu de 3s pour une préparation rapide
         }).catch((err) => {
           playPromiseRef.current = null;
           if (err.name === 'AbortError') {
@@ -596,7 +723,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     } else {
       setIsLoading(false);
     }
-  }, [autoPlay, detectNetworkSpeed]);
+  }, [autoPlay, detectNetworkSpeed, startBufferSync]);
 
   const startHealthMonitoring = useCallback(() => {
     if (healthCheckRef.current) clearInterval(healthCheckRef.current);
@@ -792,6 +919,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     useProxyRef.current = false;
     playerTypeRef.current = 'mpegts';
     activeVideoRef.current = 1;
+    isBuffer2ReadyRef.current = false;
     errorRecovery.reset();
     
     initDoubleBuffer();
@@ -998,6 +1126,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
                 const currentTime = activeVideo.currentTime;
                 const wasPlaying = !activeVideo.paused;
                 
+                // Marquer le backup comme non-prêt pendant le changement
+                isBuffer2ReadyRef.current = false;
+                
                 // Cleanup et reload avec nouvelle qualité
                 const activeRefs = activeVideoRef.current === 1 
                   ? { mpegts: mpegts1Ref, hls: hls1Ref }
@@ -1026,6 +1157,52 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
                 }
                 
                 toast.success(`✅ Qualité changée: ${targetQuality.label}`);
+                
+                // Recréer le buffer backup avec la nouvelle qualité après 1s
+                setTimeout(() => {
+                  const backupVideo = getNextVideo();
+                  const backupRefs = getNextPlayerRefs();
+                  
+                  if (backupVideo) {
+                    if (import.meta.env.DEV) {
+                      console.log('🔄 Recreating backup buffer with new quality...');
+                    }
+                    
+                    // Cleanup ancien backup
+                    cleanupPlayer(backupRefs.mpegts, backupRefs.hls);
+                    
+                    // Créer nouveau backup avec même qualité
+                    backupVideo.volume = 0;
+                    backupVideo.muted = true;
+                    
+                    const backupHls = new Hls({
+                      debug: false,
+                      enableWorker: true,
+                      lowLatencyMode: true,
+                      maxBufferLength: 60,
+                    });
+                    
+                    backupHls.loadSource(getProxiedUrl(targetQuality.url));
+                    backupHls.attachMedia(backupVideo);
+                    backupRefs.hls.current = backupHls;
+                    
+                    // Attendre que le backup soit prêt
+                    const checkReady = setInterval(() => {
+                      if (backupVideo.readyState >= 2) {
+                        clearInterval(checkReady);
+                        backupVideo.currentTime = activeVideo.currentTime;
+                        backupVideo.play().catch(() => {});
+                        isBuffer2ReadyRef.current = true;
+                        
+                        if (import.meta.env.DEV) {
+                          console.log('✅ Backup buffer recreated with new quality');
+                        }
+                      }
+                    }, 100);
+                    
+                    setTimeout(() => clearInterval(checkReady), 2000);
+                  }
+                }, 1000);
               }
             } else {
               toast.info(`Qualité: ${newQuality}`, {
