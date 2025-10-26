@@ -111,7 +111,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     });
   };
 
-  // MPEGTS.js - Specialized for MPEG-TS live streams (IPTV)
+  // MPEGTS.js - RADICAL VERSION with aggressive auto-reconnect
   const tryMpegtsPlayer = (): Promise<boolean> => {
     return new Promise(async (resolve) => {
       if (!videoRef.current || !mpegts.isSupported()) {
@@ -120,97 +120,169 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         return;
       }
 
-      console.log('🎬 Trying mpegts.js (MPEG-TS specialist)...');
+      console.log('🎬 Trying mpegts.js (MPEG-TS specialist) - RADICAL MODE...');
       const video = videoRef.current;
       const proxiedUrl = getProxiedUrl(streamUrl);
       
-      const player = mpegts.createPlayer({
-        type: 'mpegts',
-        isLive: true,
-        url: proxiedUrl,
-      }, {
-        enableWorker: true,
-        enableStashBuffer: true,
-        stashInitialSize: 256,
-        autoCleanupSourceBuffer: true, // CRITICAL: Auto-clean to prevent buffer overflow
-        autoCleanupMaxBackwardDuration: 10, // Keep only 10s of past data
-        autoCleanupMinBackwardDuration: 5, // Start cleaning after 5s
-        liveBufferLatencyChasing: true, // Chase latency to stay live
-        liveBufferLatencyMaxLatency: 2, // Max 2s latency before catching up
-        liveBufferLatencyMinRemain: 0.8, // Minimum remain
-        fixAudioTimestampGap: true, // Fix audio sync issues
-      });
+      let playerInstance: any = null;
+      let reconnectCount = 0;
+      let isActive = true;
+      let lastCurrentTime = 0;
+      let stuckCheckInterval: NodeJS.Timeout | null = null;
+      
+      // RADICAL: Function to create and attach player with auto-reconnect
+      const createAndAttachPlayer = () => {
+        if (!isActive) return;
+        
+        console.log(`🔄 Creating mpegts player instance (attempt ${reconnectCount + 1})...`);
+        
+        // Destroy old instance if exists
+        if (playerInstance) {
+          try {
+            playerInstance.destroy();
+          } catch (e) {
+            console.log('Error destroying old player:', e);
+          }
+        }
+        
+        // Create new player with AGGRESSIVE live settings
+        playerInstance = mpegts.createPlayer({
+          type: 'mpegts',
+          isLive: true, // CRITICAL: This is a LIVE stream
+          url: proxiedUrl,
+        }, {
+          enableWorker: true,
+          enableStashBuffer: true,
+          stashInitialSize: 512, // DOUBLED buffer
+          autoCleanupSourceBuffer: true,
+          autoCleanupMaxBackwardDuration: 12,
+          autoCleanupMinBackwardDuration: 3,
+          liveBufferLatencyChasing: true,
+          liveBufferLatencyMaxLatency: 3,
+          liveBufferLatencyMinRemain: 0.5,
+          fixAudioTimestampGap: true,
+        });
 
+        playerInstance.attachMediaElement(video);
+        playerInstance.load();
+        
+        // RADICAL: Listen for 'ended' event and IMMEDIATELY reconnect
+        const onEnded = () => {
+          console.warn('⚠️ Video ENDED event - AUTO RECONNECTING...');
+          setTimeout(() => createAndAttachPlayer(), 100);
+        };
+        
+        // RADICAL: Listen for MediaSource sourceended and reconnect
+        const onSourceEnded = () => {
+          console.warn('⚠️ MediaSource ENDED - AUTO RECONNECTING...');
+          setTimeout(() => createAndAttachPlayer(), 100);
+        };
+        
+        video.addEventListener('ended', onEnded);
+        
+        const onLoadedMetadata = async () => {
+          console.log('📋 mpegts.js metadata loaded');
+          
+          try {
+            video.volume = volume;
+            video.muted = isMuted;
+            
+            await video.play();
+            console.log('▶️ Video playing');
+            
+            // Remove the ended listener temporarily during initial setup
+            video.removeEventListener('ended', onEnded);
+            
+            // Re-add it after a short delay
+            setTimeout(() => {
+              if (isActive) {
+                video.addEventListener('ended', onEnded);
+              }
+            }, 3000);
+            
+            reconnectCount++;
+          } catch (err) {
+            console.log('❌ Play failed:', err);
+            if (reconnectCount < 3) {
+              setTimeout(() => createAndAttachPlayer(), 1000);
+            }
+          }
+        };
+
+        const onError = (err: any) => {
+          console.log('⚠️ mpegts.js error:', err, '- reconnecting...');
+          if (isActive && reconnectCount < 5) {
+            setTimeout(() => createAndAttachPlayer(), 1000);
+          }
+        };
+
+        video.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
+        playerInstance.on(mpegts.Events.ERROR, onError);
+        
+        // Store for cleanup
+        mpegtsRef.current = playerInstance;
+      };
+      
+      // RADICAL: Watchdog that checks if video is stuck and forces reconnect
+      const startWatchdog = () => {
+        stuckCheckInterval = setInterval(() => {
+          if (!isActive || !video) return;
+          
+          const currentTime = video.currentTime;
+          const isStuck = currentTime === lastCurrentTime && !video.paused;
+          
+          if (isStuck && currentTime > 0) {
+            console.warn('🚨 VIDEO STUCK DETECTED - FORCING RECONNECT!');
+            createAndAttachPlayer();
+          }
+          
+          lastCurrentTime = currentTime;
+        }, 5000); // Check every 5 seconds
+      };
+
+      // Start initial player
+      createAndAttachPlayer();
+      
+      // Wait for initial playback
       let resolved = false;
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          console.log('❌ mpegts.js timeout');
-          player.destroy();
+          console.log('❌ mpegts.js initial timeout');
+          isActive = false;
+          if (stuckCheckInterval) clearInterval(stuckCheckInterval);
+          if (playerInstance) playerInstance.destroy();
           resolve(false);
         }
-      }, 12000);
+      }, 15000);
 
-      player.attachMediaElement(video);
-      player.load();
-
-      const onLoadedMetadata = async () => {
+      // Check for successful playback after 3 seconds
+      setTimeout(async () => {
         if (resolved) return;
-        console.log('📋 mpegts.js metadata loaded');
         
-        try {
-          // CRITICAL: Set volume before play to ensure audio works
-          video.volume = volume;
-          video.muted = isMuted;
-          
-          await video.play();
-          console.log('▶️ Video play() called successfully');
-          
-          // Wait 2s for buffer to fill
-          await new Promise(r => setTimeout(r, 2000));
-          
-          // Verify real playback
-          const hasData = await verifyRealPlayback(video);
-          
-          if (!resolved && hasData) {
-            resolved = true;
-            clearTimeout(timeout);
-            console.log('✅ mpegts.js SUCCESS - streaming continuously!');
-            mpegtsRef.current = player;
-            setCurrentPlayer('mpegts');
-            setIsPlaying(true);
-            setHasRealData(true);
-            resolve(true);
-          } else if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            console.log('❌ mpegts.js no real data detected');
-            player.destroy();
-            resolve(false);
-          }
-        } catch (err) {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            console.log('❌ mpegts.js play failed:', err);
-            player.destroy();
-            resolve(false);
-          }
-        }
-      };
-
-      const onError = (err: any) => {
-        if (!resolved) {
+        const hasData = await verifyRealPlayback(video);
+        
+        if (hasData) {
           resolved = true;
           clearTimeout(timeout);
-          console.log('❌ mpegts.js error:', err);
-          player.destroy();
+          console.log('✅ mpegts.js SUCCESS - LIVE with AUTO-RECONNECT enabled!');
+          setCurrentPlayer('mpegts');
+          setIsPlaying(true);
+          setHasRealData(true);
+          
+          // Start the watchdog
+          startWatchdog();
+          
+          resolve(true);
+        } else if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          console.log('❌ mpegts.js no real data');
+          isActive = false;
+          if (playerInstance) playerInstance.destroy();
           resolve(false);
         }
-      };
-
-      video.addEventListener('loadedmetadata', onLoadedMetadata);
-      player.on(mpegts.Events.ERROR, onError);
+      }, 3000);
     });
   };
 
