@@ -4,7 +4,6 @@ import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { Video, Tv } from "lucide-react";
-import logo from "@/assets/zozoplayer.png";
 const PREDEFINED_CHANNELS = [{
   name: "Eurosport 1 FHD",
   url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=250665&extension=ts"
@@ -56,7 +55,7 @@ const Index = () => {
         {/* Header */}
         <div className="text-center space-y-4">
           <div className="flex items-center justify-center mb-6">
-            <img src={logo} alt="ZozoPlayer" className="h-16 md:h-20 object-contain" />
+            <img src="/logo.png" alt="ZozoPlayer" className="h-16 md:h-20 object-contain" />
           </div>
         </div>
 
