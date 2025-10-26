@@ -25,13 +25,17 @@ const getProxiedUrl = (originalUrl: string): string => {
 
 export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoRef2 = useRef<HTMLVideoElement>(null); // DUAL BUFFER
   const containerRef = useRef<HTMLDivElement>(null);
   const playerContainerRef = useRef<HTMLDivElement>(null);
   
   const mpegtsRef = useRef<any>(null);
+  const mpegtsRef2 = useRef<any>(null); // DUAL BUFFER
   const hlsRef = useRef<Hls | null>(null);
   const videojsRef = useRef<any>(null);
   const clapprRef = useRef<any>(null);
+  
+  const activeVideoRef = useRef<1 | 2>(1); // Which video is active
   
   const [currentPlayer, setCurrentPlayer] = useState<PlayerType>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -47,26 +51,46 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const { toast } = useToast();
 
   const cleanupPlayers = () => {
+    // Safe cleanup with null checks
     if (mpegtsRef.current) {
-      mpegtsRef.current.destroy();
+      try {
+        if (mpegtsRef.current.destroy) mpegtsRef.current.destroy();
+      } catch (e) {}
       mpegtsRef.current = null;
     }
+    if (mpegtsRef2.current) {
+      try {
+        if (mpegtsRef2.current.destroy) mpegtsRef2.current.destroy();
+      } catch (e) {}
+      mpegtsRef2.current = null;
+    }
     if (hlsRef.current) {
-      hlsRef.current.destroy();
+      try {
+        hlsRef.current.destroy();
+      } catch (e) {}
       hlsRef.current = null;
     }
     if (videojsRef.current) {
-      videojsRef.current.dispose();
+      try {
+        videojsRef.current.dispose();
+      } catch (e) {}
       videojsRef.current = null;
     }
     if (clapprRef.current) {
-      clapprRef.current.destroy();
+      try {
+        clapprRef.current.destroy();
+      } catch (e) {}
       clapprRef.current = null;
     }
     if (videoRef.current) {
       videoRef.current.pause();
       videoRef.current.removeAttribute('src');
       videoRef.current.load();
+    }
+    if (videoRef2.current) {
+      videoRef2.current.pause();
+      videoRef2.current.removeAttribute('src');
+      videoRef2.current.load();
     }
   };
 
@@ -111,201 +135,195 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     });
   };
 
-  // MPEGTS.js - PROFESSIONAL PRODUCTION-GRADE with HEARTBEAT MONITORING
+  // MPEGTS.js - SEAMLESS DUAL-BUFFER NO-INTERRUPTION MODE
   const tryMpegtsPlayer = (): Promise<boolean> => {
     return new Promise(async (resolve) => {
-      if (!videoRef.current || !mpegts.isSupported()) {
-        console.log('mpegts.js not supported');
+      if (!videoRef.current || !videoRef2.current || !mpegts.isSupported()) {
+        console.log('mpegts.js not supported or refs missing');
         resolve(false);
         return;
       }
 
       console.log('==================================================');
-      console.log('🎬 Trying mpegts.js - PRODUCTION MODE with HEARTBEAT...');
-      const video = videoRef.current;
+      console.log('🎬 SEAMLESS DUAL-BUFFER MODE - ZERO INTERRUPTION...');
+      const video1 = videoRef.current;
+      const video2 = videoRef2.current;
       const proxiedUrl = getProxiedUrl(streamUrl);
       
-      let playerInstance: any = null;
-      let reconnectCount = 0;
+      let player1: any = null;
+      let player2: any = null;
       let isActive = true;
-      let heartbeatInterval: NodeJS.Timeout | null = null;
-      let lastCurrentTime = 0;
-      let stuckCount = 0;
+      let switchInterval: NodeJS.Timeout | null = null;
+      let currentActive: 1 | 2 = 1;
       
-      // Hard cleanup - destroy everything
-      const hardCleanup = () => {
-        console.log('🧹 Hard cleanup...');
+      // Cleanup both players
+      const cleanup = () => {
+        console.log('🧹 Cleaning up dual buffers...');
+        isActive = false;
         
-        if (heartbeatInterval) {
-          clearInterval(heartbeatInterval);
-          heartbeatInterval = null;
+        if (switchInterval) {
+          clearInterval(switchInterval);
+          switchInterval = null;
         }
         
-        if (playerInstance) {
+        if (player1) {
           try {
-            playerInstance.unload();
-            playerInstance.detachMediaElement();
-            playerInstance.destroy();
-          } catch (e) {
-            console.log('⚠️ Cleanup warning:', e);
-          }
-          playerInstance = null;
-        }
-        
-        if (video) {
-          video.removeAttribute('src');
-          video.load();
-        }
-      };
-      
-      // Hard reconnect - immediate, no delays, no guards
-      const hardReconnect = (reason: string) => {
-        if (!isActive) return;
-        
-        reconnectCount++;
-        if (reconnectCount > 100) {
-          console.error('❌ Max reconnect attempts reached');
-          isActive = false;
-          hardCleanup();
-          return;
-        }
-        
-        console.log(`🔄 HARD RECONNECT #${reconnectCount}: ${reason}`);
-        
-        // Stop heartbeat temporarily
-        if (heartbeatInterval) {
-          clearInterval(heartbeatInterval);
-          heartbeatInterval = null;
-        }
-        
-        // Destroy old instance
-        if (playerInstance) {
-          try {
-            playerInstance.unload();
-            playerInstance.detachMediaElement();
-            playerInstance.destroy();
+            player1.unload();
+            player1.detachMediaElement();
+            player1.destroy();
           } catch (e) {}
-          playerInstance = null;
+          player1 = null;
         }
         
-        // Clear video
-        video.removeAttribute('src');
-        video.load();
+        if (player2) {
+          try {
+            player2.unload();
+            player2.detachMediaElement();
+            player2.destroy();
+          } catch (e) {}
+          player2 = null;
+        }
         
-        // Immediate recreation - no delay
-        setTimeout(() => {
-          if (!isActive) return;
-          createPlayer();
-        }, 100);
+        video1.removeAttribute('src');
+        video1.load();
+        video2.removeAttribute('src');
+        video2.load();
       };
       
-      // Create player instance
-      const createPlayer = () => {
-        if (!isActive) return;
+      // Create a player instance on a video element
+      const createPlayerOnVideo = (video: HTMLVideoElement, playerRef: 'player1' | 'player2') => {
+        console.log(`🎮 Creating player on ${playerRef}...`);
         
-        console.log(`🎮 Creating mpegts player #${reconnectCount + 1}...`);
-        
-        // PRODUCTION-GRADE CONFIG: Large buffers, aggressive cleanup
-        playerInstance = mpegts.createPlayer({
+        const player = mpegts.createPlayer({
           type: 'mpegts',
           isLive: true,
           url: proxiedUrl,
         }, {
           enableWorker: true,
           enableStashBuffer: true,
-          stashInitialSize: 768,  // DOUBLED buffer
+          stashInitialSize: 1024, // LARGE buffer
           autoCleanupSourceBuffer: true,
-          autoCleanupMaxBackwardDuration: 12,  // Keep more data
-          autoCleanupMinBackwardDuration: 3,
+          autoCleanupMaxBackwardDuration: 15,
+          autoCleanupMinBackwardDuration: 5,
           liveBufferLatencyChasing: false,
           fixAudioTimestampGap: true,
         });
 
-        playerInstance.attachMediaElement(video);
-        playerInstance.load();
-        
-        // Simple event handlers - no complexity
-        video.addEventListener('ended', () => {
-          console.warn('⚠️ Stream ENDED - immediate reconnect');
-          hardReconnect('stream ended');
-        });
+        player.attachMediaElement(video);
+        player.load();
         
         video.addEventListener('loadedmetadata', async () => {
-          console.log('📋 Metadata loaded');
+          console.log(`📋 Metadata loaded on ${playerRef}`);
+          video.volume = volume;
+          video.muted = isMuted;
           
           try {
-            video.volume = volume;
-            video.muted = isMuted;
             await video.play();
-            console.log('▶️ Playing');
-            
-            // Start heartbeat monitor
-            startHeartbeat();
+            console.log(`▶️ ${playerRef} playing`);
           } catch (err) {
-            console.log('❌ Play failed:', err);
-            hardReconnect('play failed');
+            console.log(`❌ ${playerRef} play failed:`, err);
           }
         }, { once: true });
-
-        playerInstance.on(mpegts.Events.ERROR, (err: any) => {
-          console.log('⚠️ Player error:', err);
-          hardReconnect('player error');
-        });
         
-        mpegtsRef.current = playerInstance;
+        // Ignore ended events - we switch before they happen
+        video.addEventListener('ended', (e) => {
+          e.preventDefault();
+          console.log(`⚠️ ${playerRef} ended - but we should have switched already`);
+        });
+
+        return player;
       };
       
-      // HEARTBEAT: Check video progress every 3 seconds
-      const startHeartbeat = () => {
-        if (heartbeatInterval) {
-          clearInterval(heartbeatInterval);
+      // Seamless switch between players
+      const switchPlayer = () => {
+        if (!isActive) return;
+        
+        const nextActive: 1 | 2 = currentActive === 1 ? 2 : 1;
+        const currentVideo = currentActive === 1 ? video1 : video2;
+        const nextVideo = nextActive === 1 ? video1 : video2;
+        const currentPlayer = currentActive === 1 ? player1 : player2;
+        const nextPlayer = nextActive === 1 ? player1 : player2;
+        
+        console.log(`🔄 SEAMLESS SWITCH: ${currentActive} → ${nextActive}`);
+        
+        // Make next video visible and playing
+        nextVideo.style.opacity = '1';
+        nextVideo.style.zIndex = '2';
+        if (nextVideo.paused) {
+          nextVideo.play().catch(e => console.log('Switch play error:', e));
         }
         
-        lastCurrentTime = video.currentTime;
-        stuckCount = 0;
+        // Fade out current video
+        currentVideo.style.opacity = '0';
+        currentVideo.style.zIndex = '1';
         
-        heartbeatInterval = setInterval(() => {
-          if (!isActive || !video) return;
+        // Update active reference
+        currentActive = nextActive;
+        activeVideoRef.current = nextActive;
+        
+        // After transition, recreate the old player for next switch
+        setTimeout(() => {
+          if (!isActive) return;
           
-          const currentTime = video.currentTime;
-          const buffered = video.buffered;
-          
-          // Check if video is progressing
-          if (currentTime === lastCurrentTime && !video.paused) {
-            stuckCount++;
-            console.warn(`⚠️ Video STUCK (${stuckCount}/3) - time: ${currentTime.toFixed(1)}s`);
-            
-            if (stuckCount >= 3) {
-              console.error('❌ Video frozen for 9 seconds - forcing reconnect');
-              hardReconnect('video frozen');
-              return;
-            }
-          } else {
-            // Video is progressing - reset stuck counter
-            if (stuckCount > 0) {
-              console.log(`✅ Video unstuck - resuming normal playback`);
-            }
-            stuckCount = 0;
-            lastCurrentTime = currentTime;
+          // Destroy old player
+          if (currentPlayer) {
+            try {
+              currentPlayer.unload();
+              currentPlayer.detachMediaElement();
+              currentPlayer.destroy();
+            } catch (e) {}
           }
           
-          // Log health status
-          const bufferedEnd = buffered.length > 0 ? buffered.end(buffered.length - 1) : 0;
-          console.log(`💓 Heartbeat: time=${currentTime.toFixed(1)}s, buffer=${bufferedEnd.toFixed(1)}s`);
-        }, 3000);
+          // Recreate it fresh
+          const newPlayer = createPlayerOnVideo(currentVideo, currentActive === 1 ? 'player2' : 'player1');
+          if (currentActive === 1) {
+            player2 = newPlayer;
+            mpegtsRef2.current = newPlayer;
+          } else {
+            player1 = newPlayer;
+            mpegtsRef.current = newPlayer;
+          }
+          
+          console.log(`♻️ Recreated ${currentActive === 1 ? 'player2' : 'player1'} for next switch`);
+        }, 1000);
       };
-
-      // Start initial player
-      createPlayer();
       
-      // Initial verification
+      // Initialize both players
+      console.log('🚀 Initializing DUAL BUFFER system...');
+      
+      // Create both players
+      player1 = createPlayerOnVideo(video1, 'player1');
+      mpegtsRef.current = player1;
+      
+      // Start with slight delay to avoid race
+      setTimeout(() => {
+        player2 = createPlayerOnVideo(video2, 'player2');
+        mpegtsRef2.current = player2;
+      }, 2000);
+      
+      // Set initial visibility
+      video1.style.opacity = '1';
+      video1.style.zIndex = '2';
+      video1.style.transition = 'opacity 0.5s ease';
+      
+      video2.style.opacity = '0';
+      video2.style.zIndex = '1';
+      video2.style.transition = 'opacity 0.5s ease';
+      
+      // AUTOMATIC SWITCH every 25 seconds (before MediaSource ends at ~38s)
+      switchInterval = setInterval(() => {
+        if (!isActive) return;
+        switchPlayer();
+      }, 25000);
+      
+      // Initial verification on video1
       let resolved = false;
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
           console.log('❌ Initial timeout');
           isActive = false;
-          hardCleanup();
+          cleanup();
           resolve(false);
         }
       }, 15000);
@@ -313,12 +331,12 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       setTimeout(async () => {
         if (resolved) return;
         
-        const hasData = await verifyRealPlayback(video);
+        const hasData = await verifyRealPlayback(video1);
         
         if (hasData) {
           resolved = true;
           clearTimeout(timeout);
-          console.log('✅ mpegts.js PRODUCTION MODE ACTIVE with HEARTBEAT monitoring!');
+          console.log('✅ SEAMLESS DUAL-BUFFER MODE ACTIVE - ZERO INTERRUPTION!');
           setCurrentPlayer('mpegts');
           setIsPlaying(true);
           setHasRealData(true);
@@ -328,10 +346,10 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           clearTimeout(timeout);
           console.log('❌ No real data');
           isActive = false;
-          hardCleanup();
+          cleanup();
           resolve(false);
         }
-      }, 3000);
+      }, 4000);
     });
   };
 
@@ -743,10 +761,20 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
+    
+    // Also attach to video2
+    if (videoRef2.current) {
+      videoRef2.current.addEventListener('play', handlePlay);
+      videoRef2.current.addEventListener('pause', handlePause);
+    }
 
     return () => {
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('pause', handlePause);
+      if (videoRef2.current) {
+        videoRef2.current.removeEventListener('play', handlePlay);
+        videoRef2.current.removeEventListener('pause', handlePause);
+      }
     };
   }, []);
 
@@ -754,11 +782,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     if (clapprRef.current) {
       clapprRef.current.setVolume(isMuted ? 0 : volume * 100);
     }
-    const video = videoRef.current;
-    if (video) {
-      video.volume = isMuted ? 0 : volume;
-      video.muted = isMuted;
-    }
+    // Apply to both videos
+    [videoRef.current, videoRef2.current].forEach(video => {
+      if (video) {
+        video.volume = isMuted ? 0 : volume;
+        video.muted = isMuted;
+      }
+    });
     if (videojsRef.current) {
       videojsRef.current.volume(isMuted ? 0 : volume);
       videojsRef.current.muted(isMuted);
@@ -780,10 +810,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       isPlaying ? clapprRef.current.pause() : clapprRef.current.play();
     } else if (videojsRef.current) {
       isPlaying ? videojsRef.current.pause() : videojsRef.current.play();
-    } else if (videoRef.current) {
-      isPlaying ? videoRef.current.pause() : videoRef.current.play().catch(() => {});
+    } else {
+      // For dual buffer mode, control both videos
+      const activeVideo = activeVideoRef.current === 1 ? videoRef.current : videoRef2.current;
+      if (activeVideo) {
+        isPlaying ? activeVideo.pause() : activeVideo.play().catch(() => {});
+      }
     }
-    // mpegts.js uses native video controls
   };
 
   const toggleMute = () => setIsMuted(!isMuted);
@@ -801,8 +834,23 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       onMouseLeave={() => isPlaying && setShowControls(false)}
     >
       <div ref={playerContainerRef} className="absolute inset-0" />
+      
+      {/* DUAL VIDEO BUFFERS for seamless switching */}
       <div data-vjs-player className="absolute inset-0">
-        <video ref={videoRef} className="video-js vjs-default-skin w-full h-full" playsInline />
+        <video 
+          ref={videoRef} 
+          className="video-js vjs-default-skin absolute inset-0 w-full h-full object-contain" 
+          playsInline 
+          style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
+        />
+      </div>
+      <div className="absolute inset-0">
+        <video 
+          ref={videoRef2} 
+          className="video-js vjs-default-skin absolute inset-0 w-full h-full object-contain" 
+          playsInline 
+          style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
+        />
       </div>
 
       {isLoading && !error && (
