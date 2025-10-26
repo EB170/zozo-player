@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import videojs from "video.js";
 import Clappr from "@clappr/player";
+import mpegts from "mpegts.js";
 import "video.js/dist/video-js.css";
 import { Play, Pause, Volume2, VolumeX, Maximize, Loader2, AlertCircle, CheckCircle } from "lucide-react";
 import { Button } from "./ui/button";
@@ -14,7 +15,7 @@ interface VideoPlayerProps {
   autoPlay?: boolean;
 }
 
-type PlayerType = 'hls' | 'clappr' | 'videojs' | 'native' | null;
+type PlayerType = 'mpegts' | 'hls' | 'clappr' | 'videojs' | 'native' | null;
 
 const getProxiedUrl = (originalUrl: string): string => {
   const projectId = "wxkvljkvqcamktlwfmfx";
@@ -27,6 +28,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const containerRef = useRef<HTMLDivElement>(null);
   const playerContainerRef = useRef<HTMLDivElement>(null);
   
+  const mpegtsRef = useRef<any>(null);
   const hlsRef = useRef<Hls | null>(null);
   const videojsRef = useRef<any>(null);
   const clapprRef = useRef<any>(null);
@@ -45,6 +47,10 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const { toast } = useToast();
 
   const cleanupPlayers = () => {
+    if (mpegtsRef.current) {
+      mpegtsRef.current.destroy();
+      mpegtsRef.current = null;
+    }
     if (hlsRef.current) {
       hlsRef.current.destroy();
       hlsRef.current = null;
@@ -86,19 +92,110 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         }
         
         // Success criteria: buffered data + time updates or live stream indicators
-        if ((bytesReceived > 2 && timeUpdateCount > 1) || Date.now() - startTime > 5000) {
+        if ((bytesReceived > 1 && timeUpdateCount > 0) || Date.now() - startTime > 4000) {
           clearInterval(checkInterval);
-          const success = bytesReceived > 2 || timeUpdateCount > 1;
+          const success = bytesReceived > 1 || timeUpdateCount > 0;
           console.log(`Playback verification: ${success ? 'SUCCESS' : 'FAILED'} (bytes: ${bytesReceived}, updates: ${timeUpdateCount})`);
           resolve(success);
         }
       }, 500);
       
-      // Timeout after 6 seconds
+      // Timeout after 5 seconds
       setTimeout(() => {
         clearInterval(checkInterval);
         resolve(false);
+      }, 5000);
+    });
+  };
+
+  // MPEGTS.js - Specialized for MPEG-TS live streams (IPTV)
+  const tryMpegtsPlayer = (): Promise<boolean> => {
+    return new Promise(async (resolve) => {
+      if (!videoRef.current || !mpegts.isSupported()) {
+        console.log('mpegts.js not supported');
+        resolve(false);
+        return;
+      }
+
+      console.log('🎬 Trying mpegts.js (MPEG-TS specialist)...');
+      const video = videoRef.current;
+      const proxiedUrl = getProxiedUrl(streamUrl);
+      
+      const player = mpegts.createPlayer({
+        type: 'mpegts',
+        isLive: true,
+        url: proxiedUrl,
+      }, {
+        enableWorker: true,
+        enableStashBuffer: true,
+        stashInitialSize: 128,
+        liveBufferLatencyChasing: true,
+        liveBufferLatencyMaxLatency: 3,
+        liveBufferLatencyMinRemain: 0.5,
+      });
+
+      let resolved = false;
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          console.log('❌ mpegts.js timeout');
+          player.destroy();
+          resolve(false);
+        }
       }, 6000);
+
+      player.attachMediaElement(video);
+      player.load();
+
+      const onLoadedMetadata = async () => {
+        if (resolved) return;
+        console.log('📋 mpegts.js metadata loaded');
+        
+        try {
+          await video.play();
+          
+          // Verify real playback
+          const hasData = await verifyRealPlayback(video);
+          
+          if (!resolved && hasData) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('✅ mpegts.js SUCCESS with real data!');
+            mpegtsRef.current = player;
+            setCurrentPlayer('mpegts');
+            setIsPlaying(true);
+            setHasRealData(true);
+            resolve(true);
+          } else if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('❌ mpegts.js no real data');
+            player.destroy();
+            resolve(false);
+          }
+        } catch (err) {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('❌ mpegts.js play failed');
+            player.destroy();
+            resolve(false);
+          }
+        }
+      };
+
+      const onError = (err: any) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          console.log('❌ mpegts.js error:', err);
+          player.destroy();
+          resolve(false);
+        }
+      };
+
+      video.addEventListener('loadedmetadata', onLoadedMetadata);
+      player.on(mpegts.Events.ERROR, onError);
     });
   };
 
@@ -451,8 +548,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     setError(null);
     setHasRealData(false);
     
-    // Optimized order for IPTV streams
+    // Optimized order for IPTV streams - mpegts.js first for MPEG-TS live streams
     const strategies: Array<{ name: PlayerType, fn: () => Promise<boolean> }> = [
+      { name: 'mpegts', fn: tryMpegtsPlayer },
       { name: 'hls', fn: tryHlsPlayer },
       { name: 'clappr', fn: tryClapprPlayer },
       { name: 'videojs', fn: tryVideojsPlayer },
@@ -549,6 +647,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     } else if (videoRef.current) {
       isPlaying ? videoRef.current.pause() : videoRef.current.play().catch(() => {});
     }
+    // mpegts.js uses native video controls
   };
 
   const toggleMute = () => setIsMuted(!isMuted);
