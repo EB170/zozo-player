@@ -19,6 +19,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const hlsRef = useRef<Hls | null>(null);
   const mpegtsRef = useRef<mpegts.Player | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
+  const reconnectAttemptsRef = useRef(0);
+  const lastPlaybackTimeRef = useRef(0);
+  const healthCheckIntervalRef = useRef<NodeJS.Timeout>();
   const [status, setStatus] = useState<PlayerStatus>("idle");
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -39,14 +42,43 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
     }
+    if (healthCheckIntervalRef.current) {
+      clearInterval(healthCheckIntervalRef.current);
+    }
   };
 
   const attemptReconnect = () => {
     setStatus("loading");
     setError("");
+    reconnectAttemptsRef.current += 1;
+    
+    const delay = Math.min(2000, 500 * reconnectAttemptsRef.current);
+    console.log(`Reconnect attempt ${reconnectAttemptsRef.current} in ${delay}ms`);
+    
     reconnectTimeoutRef.current = setTimeout(() => {
       initializePlayer();
-    }, 2000);
+    }, delay);
+  };
+
+  const startHealthCheck = () => {
+    if (healthCheckIntervalRef.current) {
+      clearInterval(healthCheckIntervalRef.current);
+    }
+
+    healthCheckIntervalRef.current = setInterval(() => {
+      const video = videoRef.current;
+      if (!video) return;
+
+      const currentTime = video.currentTime;
+      
+      // If video hasn't progressed in 10 seconds and should be playing, reconnect
+      if (status === "playing" && currentTime === lastPlaybackTimeRef.current) {
+        console.log("Stream stalled - forcing reconnect");
+        attemptReconnect();
+      }
+      
+      lastPlaybackTimeRef.current = currentTime;
+    }, 10000); // Check every 10 seconds
   };
 
   const initializePlayer = () => {
@@ -93,6 +125,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         });
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          console.log("HLS manifest parsed successfully");
+          reconnectAttemptsRef.current = 0; // Reset counter on success
+          startHealthCheck();
           if (autoPlay) {
             const playPromise = video.play();
             if (playPromise !== undefined) {
@@ -110,21 +145,23 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
                 console.log("Network error - attempting recovery");
                 hls.startLoad();
                 setTimeout(() => {
-                  if (hls) attemptReconnect();
-                }, 2000);
+                  if (hls && video.paused) {
+                    attemptReconnect();
+                  }
+                }, 3000);
                 break;
               case Hls.ErrorTypes.MEDIA_ERROR:
                 console.log("Media error - attempting recovery");
                 hls.recoverMediaError();
                 setTimeout(() => {
-                  if (videoRef.current && videoRef.current.paused) {
-                    videoRef.current.play().catch(() => {});
+                  if (video.paused && status === "playing") {
+                    video.play().catch(() => attemptReconnect());
                   }
                 }, 1000);
                 break;
               default:
                 console.log("Fatal error - full reconnect");
-                attemptReconnect();
+                setTimeout(() => attemptReconnect(), 1000);
                 break;
             }
           } else {
@@ -168,12 +205,18 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
         player.on(mpegts.Events.ERROR, (errorType: string, errorDetail: string) => {
           console.log("MPEG-TS Error:", errorType, errorDetail);
-          // Auto-recovery for all errors
+          // Auto-recovery for all errors with retry
           setTimeout(() => {
             if (mpegtsRef.current) {
               attemptReconnect();
             }
-          }, 2000);
+          }, 1000);
+        });
+
+        player.on(mpegts.Events.MEDIA_INFO, () => {
+          console.log("MPEG-TS media info received");
+          reconnectAttemptsRef.current = 0; // Reset counter on success
+          startHealthCheck();
         });
 
         if (autoPlay) {
@@ -187,7 +230,10 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         mpegtsRef.current = player;
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         // Native HLS support (Safari)
+        console.log("Using native HLS support");
         video.src = streamUrl;
+        reconnectAttemptsRef.current = 0;
+        startHealthCheck();
         if (autoPlay) {
           const playPromise = video.play();
           if (playPromise !== undefined) {
@@ -195,12 +241,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           }
         }
       } else {
+        console.error("No supported player for this stream format");
         setError("Format de flux non supporté");
         setStatus("error");
       }
     } catch (err) {
-      setError("Erreur d'initialisation du player");
-      setStatus("error");
+      console.error("Player initialization error:", err);
+      setTimeout(() => attemptReconnect(), 2000);
     }
   };
 
@@ -211,6 +258,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     const handlePlay = () => {
       setIsPlaying(true);
       setStatus("playing");
+      reconnectAttemptsRef.current = 0; // Reset on successful play
     };
 
     const handlePause = () => {
@@ -228,8 +276,25 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     };
 
     const handleStalled = () => {
-      console.log("Video stalled - forcing play");
-      if (video.paused && status === "playing") {
+      console.log("Video stalled - attempting recovery");
+      if (video && !video.paused && status === "playing") {
+        // Try to skip ahead slightly to unstall
+        const currentTime = video.currentTime;
+        if (currentTime > 0) {
+          video.currentTime = currentTime + 0.1;
+        }
+        video.play().catch(() => {
+          console.log("Play failed during stall recovery");
+          setTimeout(() => attemptReconnect(), 1000);
+        });
+      }
+    };
+
+    const handleSuspend = () => {
+      // Browser suspended loading - try to resume
+      if (status === "playing" && video && video.paused) {
+        console.log("Stream suspended - resuming");
+        video.load();
         video.play().catch(() => {});
       }
     };
@@ -239,6 +304,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     video.addEventListener("waiting", handleWaiting);
     video.addEventListener("error", handleError);
     video.addEventListener("stalled", handleStalled);
+    video.addEventListener("suspend", handleSuspend);
 
     return () => {
       video.removeEventListener("play", handlePlay);
@@ -246,6 +312,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       video.removeEventListener("waiting", handleWaiting);
       video.removeEventListener("error", handleError);
       video.removeEventListener("stalled", handleStalled);
+      video.removeEventListener("suspend", handleSuspend);
     };
   }, []);
 
