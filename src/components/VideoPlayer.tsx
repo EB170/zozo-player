@@ -2,16 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import videojs from "video.js";
 import Clappr from "@clappr/player";
-import DPlayer from "dplayer";
-import * as PlyrImport from "plyr";
 import "video.js/dist/video-js.css";
-import "plyr/dist/plyr.css";
-
-// @ts-ignore
-const Plyr = PlyrImport.default || PlyrImport;
-
-declare const shaka: any;
-import { Play, Pause, Volume2, VolumeX, Maximize, Loader2, AlertCircle } from "lucide-react";
+import { Play, Pause, Volume2, VolumeX, Maximize, Loader2, AlertCircle, CheckCircle } from "lucide-react";
 import { Button } from "./ui/button";
 import { Slider } from "./ui/slider";
 import { cn } from "@/lib/utils";
@@ -22,7 +14,7 @@ interface VideoPlayerProps {
   autoPlay?: boolean;
 }
 
-type PlayerType = 'clappr' | 'dplayer' | 'hls' | 'shaka' | 'plyr' | 'videojs' | 'native' | null;
+type PlayerType = 'hls' | 'clappr' | 'videojs' | 'native' | null;
 
 const getProxiedUrl = (originalUrl: string): string => {
   const projectId = "wxkvljkvqcamktlwfmfx";
@@ -38,9 +30,6 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const hlsRef = useRef<Hls | null>(null);
   const videojsRef = useRef<any>(null);
   const clapprRef = useRef<any>(null);
-  const dplayerRef = useRef<any>(null);
-  const plyrRef = useRef<any>(null);
-  const shakaRef = useRef<any>(null);
   
   const [currentPlayer, setCurrentPlayer] = useState<PlayerType>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -49,7 +38,8 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const [isMuted, setIsMuted] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [playerAttempts, setPlayerAttempts] = useState<PlayerType[]>([]);
+  const [playerAttempts, setPlayerAttempts] = useState<string[]>([]);
+  const [hasRealData, setHasRealData] = useState(false);
   
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
   const { toast } = useToast();
@@ -67,17 +57,6 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       clapprRef.current.destroy();
       clapprRef.current = null;
     }
-    if (dplayerRef.current) {
-      dplayerRef.current.destroy();
-      dplayerRef.current = null;
-    }
-    if (plyrRef.current) {
-      plyrRef.current.destroy();
-      plyrRef.current = null;
-    }
-    if (shakaRef.current) {
-      shakaRef.current = null;
-    }
     if (videoRef.current) {
       videoRef.current.pause();
       videoRef.current.removeAttribute('src');
@@ -85,15 +64,139 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     }
   };
 
-  // Clappr Player - Excellent pour IPTV Live
-  const tryClapprPlayer = (): Promise<boolean> => {
+  // Verify that video actually has data playing
+  const verifyRealPlayback = (videoElement: HTMLVideoElement): Promise<boolean> => {
     return new Promise((resolve) => {
+      let bytesReceived = 0;
+      let timeUpdateCount = 0;
+      const startTime = Date.now();
+      
+      const checkInterval = setInterval(() => {
+        const currentTime = videoElement.currentTime;
+        const buffered = videoElement.buffered;
+        
+        // Check if we have buffered data
+        if (buffered.length > 0) {
+          bytesReceived++;
+        }
+        
+        // Check if time is progressing or if it's live
+        if (currentTime > 0 || videoElement.duration === Infinity) {
+          timeUpdateCount++;
+        }
+        
+        // Success criteria: buffered data + time updates or live stream indicators
+        if ((bytesReceived > 2 && timeUpdateCount > 1) || Date.now() - startTime > 5000) {
+          clearInterval(checkInterval);
+          const success = bytesReceived > 2 || timeUpdateCount > 1;
+          console.log(`Playback verification: ${success ? 'SUCCESS' : 'FAILED'} (bytes: ${bytesReceived}, updates: ${timeUpdateCount})`);
+          resolve(success);
+        }
+      }, 500);
+      
+      // Timeout after 6 seconds
+      setTimeout(() => {
+        clearInterval(checkInterval);
+        resolve(false);
+      }, 6000);
+    });
+  };
+
+  // HLS.js - Best for HLS streams
+  const tryHlsPlayer = (): Promise<boolean> => {
+    return new Promise(async (resolve) => {
+      if (!videoRef.current || !Hls.isSupported()) {
+        console.log('HLS.js not supported');
+        resolve(false);
+        return;
+      }
+
+      console.log('🎬 Trying HLS.js...');
+      const video = videoRef.current;
+      const proxiedUrl = getProxiedUrl(streamUrl);
+      
+      const hls = new Hls({
+        debug: false,
+        enableWorker: true,
+        lowLatencyMode: false,
+        maxBufferLength: 30,
+        manifestLoadingTimeOut: 10000,
+        fragLoadingTimeOut: 15000,
+        manifestLoadingMaxRetry: 2,
+        fragLoadingMaxRetry: 3,
+      });
+
+      let resolved = false;
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          console.log('❌ HLS.js timeout');
+          hls.destroy();
+          resolve(false);
+        }
+      }, 8000);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, async () => {
+        if (resolved) return;
+        console.log('📋 HLS.js manifest parsed');
+        
+        try {
+          await video.play();
+          
+          // Verify real playback
+          const hasData = await verifyRealPlayback(video);
+          
+          if (!resolved && hasData) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('✅ HLS.js SUCCESS with real data!');
+            hlsRef.current = hls;
+            setCurrentPlayer('hls');
+            setIsPlaying(true);
+            setHasRealData(true);
+            resolve(true);
+          } else if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('❌ HLS.js no real data');
+            hls.destroy();
+            resolve(false);
+          }
+        } catch (err) {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('❌ HLS.js play failed');
+            hls.destroy();
+            resolve(false);
+          }
+        }
+      });
+
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal && !resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          console.log('❌ HLS.js fatal error:', data.details);
+          hls.destroy();
+          resolve(false);
+        }
+      });
+
+      hls.loadSource(proxiedUrl);
+      hls.attachMedia(video);
+    });
+  };
+
+  // Clappr - Excellent for live IPTV
+  const tryClapprPlayer = (): Promise<boolean> => {
+    return new Promise(async (resolve) => {
       if (!playerContainerRef.current) {
         resolve(false);
         return;
       }
 
-      console.log('Trying Clappr player...');
+      console.log('🎬 Trying Clappr...');
       const proxiedUrl = getProxiedUrl(streamUrl);
       
       try {
@@ -116,21 +219,38 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         const timeout = setTimeout(() => {
           if (!resolved) {
             resolved = true;
-            console.log('Clappr timeout');
+            console.log('❌ Clappr timeout');
             player.destroy();
             clapprRef.current = null;
             resolve(false);
           }
-        }, 12000);
+        }, 8000);
 
-        player.on(Clappr.Events.PLAYER_PLAY, () => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            console.log('Clappr success!');
-            setCurrentPlayer('clappr');
-            setIsPlaying(true);
-            resolve(true);
+        player.on(Clappr.Events.PLAYER_PLAY, async () => {
+          if (resolved) return;
+          console.log('▶️ Clappr playing event');
+          
+          // Get video element from Clappr
+          const videoEl = player.core?.activePlayback?.el as HTMLVideoElement;
+          if (videoEl) {
+            const hasData = await verifyRealPlayback(videoEl);
+            
+            if (!resolved && hasData) {
+              resolved = true;
+              clearTimeout(timeout);
+              console.log('✅ Clappr SUCCESS with real data!');
+              setCurrentPlayer('clappr');
+              setIsPlaying(true);
+              setHasRealData(true);
+              resolve(true);
+            } else if (!resolved) {
+              resolved = true;
+              clearTimeout(timeout);
+              console.log('❌ Clappr no real data');
+              player.destroy();
+              clapprRef.current = null;
+              resolve(false);
+            }
           }
         });
 
@@ -138,273 +258,28 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           if (!resolved) {
             resolved = true;
             clearTimeout(timeout);
-            console.log('Clappr error');
+            console.log('❌ Clappr error');
             player.destroy();
             clapprRef.current = null;
             resolve(false);
           }
         });
       } catch (error) {
-        console.log('Clappr initialization error:', error);
+        console.log('❌ Clappr init error:', error);
         resolve(false);
       }
     });
   };
 
-  // DPlayer - Spécialisé IPTV
-  const tryDPlayerPlayer = (): Promise<boolean> => {
-    return new Promise((resolve) => {
-      if (!playerContainerRef.current) {
-        resolve(false);
-        return;
-      }
-
-      console.log('Trying DPlayer...');
-      const proxiedUrl = getProxiedUrl(streamUrl);
-      
-      try {
-        const player = new DPlayer({
-          container: playerContainerRef.current,
-          video: {
-            url: proxiedUrl,
-            type: 'auto',
-          },
-          autoplay: true,
-          live: true,
-        });
-
-        dplayerRef.current = player;
-        let resolved = false;
-
-        const timeout = setTimeout(() => {
-          if (!resolved) {
-            resolved = true;
-            console.log('DPlayer timeout');
-            player.destroy();
-            dplayerRef.current = null;
-            resolve(false);
-          }
-        }, 12000);
-
-        player.on('play', () => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            console.log('DPlayer success!');
-            setCurrentPlayer('dplayer');
-            setIsPlaying(true);
-            resolve(true);
-          }
-        });
-
-        player.on('error', () => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            console.log('DPlayer error');
-            player.destroy();
-            dplayerRef.current = null;
-            resolve(false);
-          }
-        });
-      } catch (error) {
-        console.log('DPlayer initialization error:', error);
-        resolve(false);
-      }
-    });
-  };
-
-  // Shaka Player - Google's robust player
-  const tryShakaPlayer = (): Promise<boolean> => {
-    return new Promise((resolve) => {
-      if (!videoRef.current) {
-        resolve(false);
-        return;
-      }
-
-      console.log('Trying Shaka player...');
-      const video = videoRef.current;
-      const proxiedUrl = getProxiedUrl(streamUrl);
-
-      try {
-        shaka.polyfill.installAll();
-
-        const player = new shaka.Player();
-        player.attach(video);
-        shakaRef.current = player;
-
-        let resolved = false;
-        const timeout = setTimeout(() => {
-          if (!resolved) {
-            resolved = true;
-            console.log('Shaka timeout');
-            resolve(false);
-          }
-        }, 12000);
-
-        player.load(proxiedUrl)
-          .then(() => {
-            if (!resolved) {
-              resolved = true;
-              clearTimeout(timeout);
-              console.log('Shaka success!');
-              setCurrentPlayer('shaka');
-              
-              video.play()
-                .then(() => setIsPlaying(true))
-                .catch(() => {});
-              
-              resolve(true);
-            }
-          })
-          .catch((error: any) => {
-            if (!resolved) {
-              resolved = true;
-              clearTimeout(timeout);
-              console.log('Shaka error:', error);
-              resolve(false);
-            }
-          });
-      } catch (error) {
-        console.log('Shaka initialization error:', error);
-        resolve(false);
-      }
-    });
-  };
-
-  // Plyr with HLS
-  const tryPlyrPlayer = (): Promise<boolean> => {
-    return new Promise((resolve) => {
-      if (!videoRef.current) {
-        resolve(false);
-        return;
-      }
-
-      console.log('Trying Plyr player...');
-      const video = videoRef.current;
-      const proxiedUrl = getProxiedUrl(streamUrl);
-
-      try {
-        const player = new Plyr(video, {
-          controls: [],
-          autoplay: true,
-          muted: false,
-        });
-
-        plyrRef.current = player;
-        video.src = proxiedUrl;
-
-        let resolved = false;
-        const timeout = setTimeout(() => {
-          if (!resolved) {
-            resolved = true;
-            console.log('Plyr timeout');
-            player.destroy();
-            plyrRef.current = null;
-            resolve(false);
-          }
-        }, 12000);
-
-        player.on('playing', () => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            console.log('Plyr success!');
-            setCurrentPlayer('plyr');
-            setIsPlaying(true);
-            resolve(true);
-          }
-        });
-
-        player.on('error', () => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            console.log('Plyr error');
-            player.destroy();
-            plyrRef.current = null;
-            resolve(false);
-          }
-        });
-
-        video.load();
-      } catch (error) {
-        console.log('Plyr initialization error:', error);
-        resolve(false);
-      }
-    });
-  };
-
-  // HLS.js
-  const tryHlsPlayer = (): Promise<boolean> => {
-    return new Promise((resolve) => {
-      if (!videoRef.current || !Hls.isSupported()) {
-        resolve(false);
-        return;
-      }
-
-      console.log('Trying HLS.js player...');
-      const video = videoRef.current;
-      const proxiedUrl = getProxiedUrl(streamUrl);
-      
-      const hls = new Hls({
-        debug: false,
-        enableWorker: true,
-        maxBufferLength: 30,
-        manifestLoadingTimeOut: 15000,
-        fragLoadingTimeOut: 20000,
-      });
-
-      let resolved = false;
-      const timeout = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          console.log('HLS.js timeout');
-          hls.destroy();
-          resolve(false);
-        }
-      }, 12000);
-
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(timeout);
-          console.log('HLS.js success!');
-          hlsRef.current = hls;
-          setCurrentPlayer('hls');
-          
-          video.play()
-            .then(() => setIsPlaying(true))
-            .catch(() => {});
-          
-          resolve(true);
-        }
-      });
-
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        if (data.fatal && !resolved) {
-          resolved = true;
-          clearTimeout(timeout);
-          console.log('HLS.js fatal error');
-          hls.destroy();
-          resolve(false);
-        }
-      });
-
-      hls.loadSource(proxiedUrl);
-      hls.attachMedia(video);
-    });
-  };
-
-  // Video.js
+  // Video.js - Robust fallback
   const tryVideojsPlayer = (): Promise<boolean> => {
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
       if (!videoRef.current) {
         resolve(false);
         return;
       }
 
-      console.log('Trying Video.js player...');
+      console.log('🎬 Trying Video.js...');
       const proxiedUrl = getProxiedUrl(streamUrl);
       
       try {
@@ -412,7 +287,15 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           controls: false,
           autoplay: false,
           preload: 'auto',
-          sources: [{ src: proxiedUrl, type: 'video/mp2t' }]
+          html5: {
+            vhs: {
+              overrideNative: true,
+            },
+          },
+          sources: [{ 
+            src: proxiedUrl, 
+            type: streamUrl.includes('.m3u8') ? 'application/x-mpegURL' : 'video/mp2t'
+          }]
         });
 
         videojsRef.current = player;
@@ -421,25 +304,50 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         const timeout = setTimeout(() => {
           if (!resolved) {
             resolved = true;
-            console.log('Video.js timeout');
+            console.log('❌ Video.js timeout');
             player.dispose();
             videojsRef.current = null;
             resolve(false);
           }
-        }, 12000);
+        }, 8000);
 
-        player.on('canplay', () => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            console.log('Video.js success!');
-            setCurrentPlayer('videojs');
+        player.on('canplay', async () => {
+          if (resolved) return;
+          console.log('▶️ Video.js can play');
+          
+          try {
+            await player.play();
+            const videoEl = player.el().querySelector('video') as HTMLVideoElement;
             
-            player.play()
-              .then(() => setIsPlaying(true))
-              .catch(() => {});
-            
-            resolve(true);
+            if (videoEl) {
+              const hasData = await verifyRealPlayback(videoEl);
+              
+              if (!resolved && hasData) {
+                resolved = true;
+                clearTimeout(timeout);
+                console.log('✅ Video.js SUCCESS with real data!');
+                setCurrentPlayer('videojs');
+                setIsPlaying(true);
+                setHasRealData(true);
+                resolve(true);
+              } else if (!resolved) {
+                resolved = true;
+                clearTimeout(timeout);
+                console.log('❌ Video.js no real data');
+                player.dispose();
+                videojsRef.current = null;
+                resolve(false);
+              }
+            }
+          } catch (err) {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timeout);
+              console.log('❌ Video.js play failed');
+              player.dispose();
+              videojsRef.current = null;
+              resolve(false);
+            }
           }
         });
 
@@ -447,28 +355,28 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           if (!resolved) {
             resolved = true;
             clearTimeout(timeout);
-            console.log('Video.js error');
+            console.log('❌ Video.js error');
             player.dispose();
             videojsRef.current = null;
             resolve(false);
           }
         });
       } catch (error) {
-        console.log('Video.js error:', error);
+        console.log('❌ Video.js init error:', error);
         resolve(false);
       }
     });
   };
 
-  // Native player
+  // Native HTML5 player
   const tryNativePlayer = (): Promise<boolean> => {
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
       if (!videoRef.current) {
         resolve(false);
         return;
       }
 
-      console.log('Trying native player...');
+      console.log('🎬 Trying Native player...');
       const video = videoRef.current;
       const proxiedUrl = getProxiedUrl(streamUrl);
       
@@ -476,25 +384,46 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          console.log('Native player timeout');
+          console.log('❌ Native timeout');
           resolve(false);
         }
-      }, 12000);
+      }, 8000);
 
-      const onCanPlay = () => {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(timeout);
-          console.log('Native player success!');
-          setCurrentPlayer('native');
+      const onCanPlay = async () => {
+        if (resolved) return;
+        console.log('▶️ Native can play');
+        
+        try {
+          await video.play();
+          const hasData = await verifyRealPlayback(video);
           
-          video.play()
-            .then(() => setIsPlaying(true))
-            .catch(() => {});
-          
-          video.removeEventListener('canplay', onCanPlay);
-          video.removeEventListener('error', onError);
-          resolve(true);
+          if (!resolved && hasData) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('✅ Native SUCCESS with real data!');
+            setCurrentPlayer('native');
+            setIsPlaying(true);
+            setHasRealData(true);
+            video.removeEventListener('canplay', onCanPlay);
+            video.removeEventListener('error', onError);
+            resolve(true);
+          } else if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('❌ Native no real data');
+            video.removeEventListener('canplay', onCanPlay);
+            video.removeEventListener('error', onError);
+            resolve(false);
+          }
+        } catch (err) {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('❌ Native play failed');
+            video.removeEventListener('canplay', onCanPlay);
+            video.removeEventListener('error', onError);
+            resolve(false);
+          }
         }
       };
 
@@ -502,7 +431,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         if (!resolved) {
           resolved = true;
           clearTimeout(timeout);
-          console.log('Native player error');
+          console.log('❌ Native error');
           video.removeEventListener('canplay', onCanPlay);
           video.removeEventListener('error', onError);
           resolve(false);
@@ -520,41 +449,45 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     cleanupPlayers();
     setIsLoading(true);
     setError(null);
+    setHasRealData(false);
     
+    // Optimized order for IPTV streams
     const strategies: Array<{ name: PlayerType, fn: () => Promise<boolean> }> = [
-      { name: 'clappr', fn: tryClapprPlayer },
-      { name: 'dplayer', fn: tryDPlayerPlayer },
       { name: 'hls', fn: tryHlsPlayer },
-      { name: 'shaka', fn: tryShakaPlayer },
-      { name: 'plyr', fn: tryPlyrPlayer },
+      { name: 'clappr', fn: tryClapprPlayer },
       { name: 'videojs', fn: tryVideojsPlayer },
       { name: 'native', fn: tryNativePlayer },
     ];
 
-    const attempted: PlayerType[] = [];
+    const attempted: string[] = [];
 
     for (const strategy of strategies) {
-      attempted.push(strategy.name);
+      attempted.push(strategy.name!);
       setPlayerAttempts([...attempted]);
       
-      console.log(`\n=== Trying ${strategy.name} player ===`);
+      console.log(`\n${'='.repeat(50)}`);
+      console.log(`🎯 Testing ${strategy.name?.toUpperCase()} player`);
+      console.log('='.repeat(50));
+      
       const success = await strategy.fn();
       
       if (success) {
         setIsLoading(false);
         toast({
-          title: "Flux connecté",
+          title: "✓ Flux connecté",
           description: `Lecture avec ${strategy.name}`,
         });
         return;
       }
       
-      await new Promise(resolve => setTimeout(resolve, 300));
+      // Small delay between attempts
+      await new Promise(resolve => setTimeout(resolve, 200));
     }
 
-    console.error('All 7 players failed');
+    // All players failed
+    console.error('💀 All players failed');
     setIsLoading(false);
-    setError('Aucun des 7 lecteurs disponibles ne peut lire ce flux. Le flux est peut-être hors ligne ou incompatible.');
+    setError('Impossible de lire ce flux. Le serveur peut être temporairement indisponible.');
     toast({
       title: "Erreur de lecture",
       description: "Tous les lecteurs ont échoué",
@@ -563,22 +496,8 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   };
 
   useEffect(() => {
-    // Load Shaka Player dynamically
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.10/shaka-player.compiled.min.js';
-    script.onload = () => {
-      tryPlayers();
-    };
-    script.onerror = () => {
-      console.error('Failed to load Shaka Player');
-      tryPlayers();
-    };
-    document.head.appendChild(script);
-
-    return () => {
-      cleanupPlayers();
-      document.head.removeChild(script);
-    };
+    tryPlayers();
+    return () => cleanupPlayers();
   }, [streamUrl]);
 
   useEffect(() => {
@@ -600,13 +519,6 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   useEffect(() => {
     if (clapprRef.current) {
       clapprRef.current.setVolume(isMuted ? 0 : volume * 100);
-    }
-    if (dplayerRef.current) {
-      dplayerRef.current.volume(isMuted ? 0 : volume, isMuted);
-    }
-    if (plyrRef.current) {
-      plyrRef.current.volume = isMuted ? 0 : volume;
-      plyrRef.current.muted = isMuted;
     }
     const video = videoRef.current;
     if (video) {
@@ -632,10 +544,6 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const togglePlay = () => {
     if (clapprRef.current) {
       isPlaying ? clapprRef.current.pause() : clapprRef.current.play();
-    } else if (dplayerRef.current) {
-      isPlaying ? dplayerRef.current.pause() : dplayerRef.current.play();
-    } else if (plyrRef.current) {
-      isPlaying ? plyrRef.current.pause() : plyrRef.current.play();
     } else if (videojsRef.current) {
       isPlaying ? videojsRef.current.pause() : videojsRef.current.play();
     } else if (videoRef.current) {
@@ -667,8 +575,19 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           <div className="flex flex-col items-center gap-4">
             <Loader2 className="w-12 h-12 text-primary animate-spin" />
             <div className="text-center">
-              <p className="text-sm text-white mb-2">Test des lecteurs...</p>
-              <p className="text-xs text-gray-400">{playerAttempts.join(' → ')}</p>
+              <p className="text-sm text-white mb-2">Test des lecteurs vidéo...</p>
+              <div className="flex items-center gap-2 text-xs text-gray-400">
+                {playerAttempts.map((player, i) => (
+                  <span key={i} className="flex items-center gap-1">
+                    {i === playerAttempts.length - 1 ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <span className="text-red-500">✗</span>
+                    )}
+                    {player}
+                  </span>
+                ))}
+              </div>
             </div>
           </div>
         </div>
@@ -681,10 +600,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
             <div className="space-y-2">
               <p className="text-sm font-semibold text-white">Impossible de charger le flux</p>
               <p className="text-xs text-gray-400">{error}</p>
-              <p className="text-xs text-gray-500 mt-2">Testés: {playerAttempts.join(', ')}</p>
             </div>
             <Button onClick={tryPlayers} variant="outline" className="mt-2">
-              Réessayer tous les lecteurs
+              Réessayer
             </Button>
           </div>
         </div>
@@ -716,10 +634,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
           <div className="flex-1" />
 
-          {isPlaying && !isLoading && currentPlayer && (
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              <span className="text-xs text-red-500 font-semibold">● EN DIRECT ({currentPlayer})</span>
+          {isPlaying && !isLoading && currentPlayer && hasRealData && (
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 bg-green-500/20 px-3 py-1 rounded-full">
+                <CheckCircle className="w-3 h-3 text-green-500" />
+                <span className="text-xs text-green-500 font-semibold">LIVE</span>
+              </div>
+              <span className="text-xs text-gray-400">({currentPlayer})</span>
             </div>
           )}
 
