@@ -70,12 +70,28 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     }
   };
 
-  // Verify that video actually has data playing
+  // Verify that video actually has data playing (including audio-only detection)
   const verifyRealPlayback = (videoElement: HTMLVideoElement): Promise<boolean> => {
     return new Promise((resolve) => {
       let bytesReceived = 0;
       let timeUpdateCount = 0;
+      let audioDetected = false;
       const startTime = Date.now();
+      
+      // Setup audio detection
+      let audioContext: AudioContext | null = null;
+      let analyser: AnalyserNode | null = null;
+      
+      try {
+        audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const source = audioContext.createMediaElementSource(videoElement);
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+      } catch (e) {
+        console.log('Audio context creation failed:', e);
+      }
       
       const checkInterval = setInterval(() => {
         const currentTime = videoElement.currentTime;
@@ -91,20 +107,32 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           timeUpdateCount++;
         }
         
-        // Success criteria: buffered data + time updates or live stream indicators
-        if ((bytesReceived > 1 && timeUpdateCount > 0) || Date.now() - startTime > 4000) {
+        // Check audio activity
+        if (analyser) {
+          const dataArray = new Uint8Array(analyser.frequencyBinCount);
+          analyser.getByteFrequencyData(dataArray);
+          const audioLevel = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+          if (audioLevel > 0) {
+            audioDetected = true;
+          }
+        }
+        
+        // Success criteria: audio OR buffered data OR time updates
+        if (audioDetected || bytesReceived > 0 || timeUpdateCount > 0 || Date.now() - startTime > 3000) {
           clearInterval(checkInterval);
-          const success = bytesReceived > 1 || timeUpdateCount > 0;
-          console.log(`Playback verification: ${success ? 'SUCCESS' : 'FAILED'} (bytes: ${bytesReceived}, updates: ${timeUpdateCount})`);
+          const success = audioDetected || bytesReceived > 0 || timeUpdateCount > 0;
+          console.log(`Playback verification: ${success ? 'SUCCESS' : 'FAILED'} (bytes: ${bytesReceived}, time: ${timeUpdateCount}, audio: ${audioDetected})`);
+          if (audioContext) audioContext.close();
           resolve(success);
         }
-      }, 500);
+      }, 300);
       
-      // Timeout after 5 seconds
+      // Timeout after 6 seconds
       setTimeout(() => {
         clearInterval(checkInterval);
-        resolve(false);
-      }, 5000);
+        if (audioContext) audioContext.close();
+        resolve(audioDetected || bytesReceived > 0 || timeUpdateCount > 0);
+      }, 6000);
     });
   };
 
@@ -128,10 +156,14 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       }, {
         enableWorker: true,
         enableStashBuffer: true,
-        stashInitialSize: 128,
-        liveBufferLatencyChasing: true,
-        liveBufferLatencyMaxLatency: 3,
-        liveBufferLatencyMinRemain: 0.5,
+        stashInitialSize: 512, // Bigger buffer for audio+video
+        autoCleanupSourceBuffer: false, // Keep buffer
+        liveBufferLatencyChasing: false, // Don't chase latency aggressively
+        liveBufferLatencyMaxLatency: 8, // Allow more latency
+        liveBufferLatencyMinRemain: 2,
+        fixAudioTimestampGap: true, // Fix audio gaps
+        lazyLoad: false,
+        lazyLoadMaxDuration: 0,
       });
 
       let resolved = false;
@@ -142,7 +174,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           player.destroy();
           resolve(false);
         }
-      }, 6000);
+      }, 15000); // Much longer timeout for stream initialization
 
       player.attachMediaElement(video);
       player.load();
@@ -154,13 +186,17 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         try {
           await video.play();
           
-          // Verify real playback
+          // Wait longer for stream to stabilize
+          console.log('⏳ Waiting 4s for stream stabilization...');
+          await new Promise(r => setTimeout(r, 4000));
+          
+          // Verify real playback (now with audio detection)
           const hasData = await verifyRealPlayback(video);
           
           if (!resolved && hasData) {
             resolved = true;
             clearTimeout(timeout);
-            console.log('✅ mpegts.js SUCCESS with real data!');
+            console.log('✅ mpegts.js SUCCESS with real data (audio/video)!');
             mpegtsRef.current = player;
             setCurrentPlayer('mpegts');
             setIsPlaying(true);
@@ -169,7 +205,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           } else if (!resolved) {
             resolved = true;
             clearTimeout(timeout);
-            console.log('❌ mpegts.js no real data');
+            console.log('❌ mpegts.js no real data detected');
             player.destroy();
             resolve(false);
           }
@@ -177,7 +213,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           if (!resolved) {
             resolved = true;
             clearTimeout(timeout);
-            console.log('❌ mpegts.js play failed');
+            console.log('❌ mpegts.js play failed:', err);
             player.destroy();
             resolve(false);
           }
