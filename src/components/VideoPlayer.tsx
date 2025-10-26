@@ -48,6 +48,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const networkSpeedRef = useRef<'fast' | 'medium' | 'slow'>('fast');
   const lastTapTimeRef = useRef(0);
   const lastTapSideRef = useRef<'left' | 'right' | null>(null);
+  const playPromiseRef = useRef<Promise<void> | null>(null);
   
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -207,7 +208,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           // Restaurer position et lecture
           activeVideo.currentTime = currentTime;
           if (wasPlaying) {
-            activeVideo.play();
+            playPromiseRef.current = activeVideo.play().catch(err => {
+              if (err.name !== 'AbortError') {
+                console.error('ABR play error:', err);
+              }
+            });
           }
           
           toast.info(`📊 Qualité adaptée: ${targetQuality.label}`, {
@@ -469,7 +474,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         
         nextVideo.currentTime = activeVideo.currentTime;
         nextVideo.playbackRate = playbackRate;
-        nextVideo.play().then(() => {
+        playPromiseRef.current = nextVideo.play().then(() => {
           // Transition fluide
           activeVideo.style.opacity = '0';
           nextVideo.style.opacity = '1';
@@ -477,14 +482,28 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           activeVideo.style.zIndex = '1';
           
           setTimeout(() => {
-            activeVideo.pause();
+            // Attendre la fin de la promise play avant de pause
+            if (playPromiseRef.current) {
+              playPromiseRef.current.then(() => {
+                activeVideo.pause();
+                playPromiseRef.current = null;
+              }).catch(() => {
+                activeVideo.pause();
+                playPromiseRef.current = null;
+              });
+            } else {
+              activeVideo.pause();
+            }
             activeVideoRef.current = activeVideoRef.current === 1 ? 2 : 1;
             setIsTransitioning(false);
             errorRecovery.reset();
           }, 300);
         }).catch(err => {
-          console.error('Switch playback error:', err);
+          if (err.name !== 'AbortError') {
+            console.error('Switch playback error:', err);
+          }
           setIsTransitioning(false);
+          playPromiseRef.current = null;
         });
       }
     }, 50);
@@ -517,9 +536,10 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         if (import.meta.env.DEV) {
           console.log('▶️ Attempting playback...');
         }
-        video1.play().then(() => {
+        playPromiseRef.current = video1.play().then(() => {
           setIsPlaying(true);
           setIsLoading(false);
+          playPromiseRef.current = null;
           if (import.meta.env.DEV) {
             console.log('✅ Playback started successfully');
           }
@@ -541,6 +561,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
             }
           }, 3000);
         }).catch((err) => {
+          playPromiseRef.current = null;
+          if (err.name === 'AbortError') {
+            if (import.meta.env.DEV) {
+              console.warn('⚠️ Play interrupted (AbortError) - ignoring');
+            }
+            return;
+          }
           console.error('❌ Playback failed:', err);
           
           if (errorRecovery.canRetry) {
@@ -795,11 +822,31 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     if (!activeVideo) return;
     
     if (isPlaying) {
-      activeVideo.pause();
-      setIsPlaying(false);
+      // Attendre la fin de la play promise avant de pause
+      if (playPromiseRef.current) {
+        playPromiseRef.current.then(() => {
+          activeVideo.pause();
+          setIsPlaying(false);
+          playPromiseRef.current = null;
+        }).catch(() => {
+          activeVideo.pause();
+          setIsPlaying(false);
+          playPromiseRef.current = null;
+        });
+      } else {
+        activeVideo.pause();
+        setIsPlaying(false);
+      }
     } else {
-      activeVideo.play();
-      setIsPlaying(true);
+      playPromiseRef.current = activeVideo.play().then(() => {
+        setIsPlaying(true);
+        playPromiseRef.current = null;
+      }).catch(err => {
+        playPromiseRef.current = null;
+        if (err.name !== 'AbortError') {
+          console.error('Play error:', err);
+        }
+      });
     }
   };
 
@@ -971,7 +1018,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
                 
                 activeVideo.currentTime = currentTime;
                 if (wasPlaying) {
-                  activeVideo.play();
+                  playPromiseRef.current = activeVideo.play().catch(err => {
+                    if (err.name !== 'AbortError') {
+                      console.error('Quality switch play error:', err);
+                    }
+                  });
                 }
                 
                 toast.success(`✅ Qualité changée: ${targetQuality.label}`);
