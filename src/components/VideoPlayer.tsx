@@ -94,44 +94,60 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
     try {
       if (isHLS && Hls.isSupported()) {
-        // HLS streaming with aggressive recovery settings
+        // HLS streaming with maximum compatibility and stability
         const hls = new Hls({
           enableWorker: true,
           autoStartLoad: true,
           startFragPrefetch: true,
-          lowLatencyMode: true,
-          backBufferLength: 10,
-          maxBufferLength: 20,
-          maxMaxBufferLength: 40,
-          liveSyncDuration: 6,
-          liveSyncDurationCount: 3,
-          liveMaxLatencyDurationCount: 10,
+          lowLatencyMode: false, // Disable for better compatibility
+          backBufferLength: 20,
+          maxBufferLength: 30,
+          maxMaxBufferLength: 60,
+          liveSyncDuration: 3,
+          liveSyncDurationCount: 5,
+          liveMaxLatencyDurationCount: Infinity,
           liveDurationInfinity: true,
-          maxLoadingDelay: 4,
-          maxBufferHole: 0.5,
-          highBufferWatchdogPeriod: 2,
-          nudgeOffset: 0.1,
-          nudgeMaxRetry: 10,
-          maxFragLookUpTolerance: 0.25,
-          manifestLoadingTimeOut: 20000,
-          manifestLoadingMaxRetry: 6,
-          manifestLoadingRetryDelay: 1000,
-          levelLoadingTimeOut: 20000,
-          levelLoadingMaxRetry: 6,
-          levelLoadingRetryDelay: 1000,
-          fragLoadingTimeOut: 40000,
-          fragLoadingMaxRetry: 10,
-          fragLoadingRetryDelay: 1000,
+          maxLoadingDelay: 8,
+          maxBufferHole: 1,
+          highBufferWatchdogPeriod: 3,
+          nudgeOffset: 0.5,
+          nudgeMaxRetry: 20,
+          maxFragLookUpTolerance: 0.5,
+          manifestLoadingTimeOut: 30000,
+          manifestLoadingMaxRetry: Infinity,
+          manifestLoadingRetryDelay: 500,
+          levelLoadingTimeOut: 30000,
+          levelLoadingMaxRetry: Infinity,
+          levelLoadingRetryDelay: 500,
+          fragLoadingTimeOut: 60000,
+          fragLoadingMaxRetry: Infinity,
+          fragLoadingRetryDelay: 500,
+          startLevel: -1, // Auto quality
+          capLevelToPlayerSize: false,
+          capLevelOnFPSDrop: false,
+          testBandwidth: false,
+          progressive: true,
+          xhrSetup: (xhr: XMLHttpRequest) => {
+            xhr.withCredentials = false; // Better CORS compatibility
+          },
         });
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           console.log("HLS manifest parsed successfully");
-          reconnectAttemptsRef.current = 0; // Reset counter on success
+          reconnectAttemptsRef.current = 0;
+          setStatus("loading");
           startHealthCheck();
-          if (autoPlay) {
+        });
+
+        hls.on(Hls.Events.FRAG_LOADED, () => {
+          // First fragment loaded, ready to play
+          if (autoPlay && video.paused) {
             const playPromise = video.play();
             if (playPromise !== undefined) {
-              playPromise.catch(() => setStatus("paused"));
+              playPromise.catch((e) => {
+                console.log("Autoplay blocked:", e);
+                setStatus("paused");
+              });
             }
           }
         });
@@ -142,22 +158,41 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           if (data.fatal) {
             switch (data.type) {
               case Hls.ErrorTypes.NETWORK_ERROR:
-                console.log("Network error - attempting recovery");
+                console.log("Fatal network error - trying recovery sequence");
+                // Try immediate recovery first
                 hls.startLoad();
                 setTimeout(() => {
-                  if (hls && video.paused) {
+                  try {
+                    hls.recoverMediaError();
+                  } catch (e) {
+                    console.log("Media recovery failed, full reconnect");
+                  }
+                }, 500);
+                // If still not working, full reconnect
+                setTimeout(() => {
+                  if (!hls || video.paused || video.error) {
                     attemptReconnect();
                   }
                 }, 3000);
                 break;
               case Hls.ErrorTypes.MEDIA_ERROR:
-                console.log("Media error - attempting recovery");
-                hls.recoverMediaError();
+                console.log("Fatal media error - attempting recovery");
+                try {
+                  hls.recoverMediaError();
+                } catch (e) {
+                  console.log("Recovery failed, reconnecting");
+                  setTimeout(() => attemptReconnect(), 1000);
+                  break;
+                }
+                // Try to restart playback
                 setTimeout(() => {
-                  if (video.paused && status === "playing") {
-                    video.play().catch(() => attemptReconnect());
+                  if (video.paused && autoPlay) {
+                    video.play().catch(() => {
+                      console.log("Play failed after recovery, reconnecting");
+                      attemptReconnect();
+                    });
                   }
-                }, 1000);
+                }, 1500);
                 break;
               default:
                 console.log("Fatal error - full reconnect");
@@ -165,9 +200,14 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
                 break;
             }
           } else {
-            // Non-fatal errors - try to recover silently
+            // Non-fatal errors - aggressive silent recovery
+            console.log("Non-fatal error - attempting silent recovery");
             if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-              hls.recoverMediaError();
+              try {
+                hls.recoverMediaError();
+              } catch (e) {
+                console.log("Silent recovery failed");
+              }
             } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
               hls.startLoad();
             }
@@ -178,26 +218,29 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         hls.attachMedia(video);
         hlsRef.current = hls;
       } else if (isTS && mpegts.isSupported()) {
-        // MPEG-TS streaming with optimized settings
+        // MPEG-TS streaming with maximum stability
         const player = mpegts.createPlayer({
           type: "mpegts",
           isLive: true,
           url: streamUrl,
+          hasAudio: true,
+          hasVideo: true,
         }, {
           enableWorker: true,
-          enableStashBuffer: false,
-          stashInitialSize: 128,
+          enableStashBuffer: true,
+          stashInitialSize: 384,
           autoCleanupSourceBuffer: true,
-          autoCleanupMaxBackwardDuration: 10,
-          autoCleanupMinBackwardDuration: 5,
-          liveBufferLatencyChasing: true,
-          liveBufferLatencyMaxLatency: 3,
-          liveBufferLatencyMinRemain: 0.5,
+          autoCleanupMaxBackwardDuration: 20,
+          autoCleanupMinBackwardDuration: 10,
+          liveBufferLatencyChasing: false, // Disable for stability
+          liveBufferLatencyMaxLatency: 5,
+          liveBufferLatencyMinRemain: 1,
           liveSync: true,
           lazyLoad: false,
-          lazyLoadMaxDuration: 3 * 60,
-          lazyLoadRecoverDuration: 30,
+          lazyLoadMaxDuration: 5 * 60,
+          lazyLoadRecoverDuration: 60,
           deferLoadAfterSourceOpen: false,
+          fixAudioTimestampGap: true,
         });
 
         player.attachMediaElement(video);
@@ -205,26 +248,54 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
         player.on(mpegts.Events.ERROR, (errorType: string, errorDetail: string) => {
           console.log("MPEG-TS Error:", errorType, errorDetail);
-          // Auto-recovery for all errors with retry
+          // Aggressive recovery with multiple attempts
           setTimeout(() => {
             if (mpegtsRef.current) {
-              attemptReconnect();
+              try {
+                player.unload();
+                setTimeout(() => {
+                  if (mpegtsRef.current) {
+                    player.load();
+                    if (autoPlay) {
+                      try {
+                        player.play();
+                      } catch (e) {
+                        console.log("Play error:", e);
+                      }
+                    }
+                  }
+                }, 500);
+              } catch (e) {
+                console.log("Reload failed, full reconnect");
+                attemptReconnect();
+              }
             }
           }, 1000);
         });
 
         player.on(mpegts.Events.MEDIA_INFO, () => {
           console.log("MPEG-TS media info received");
-          reconnectAttemptsRef.current = 0; // Reset counter on success
+          reconnectAttemptsRef.current = 0;
+          setStatus("loading");
           startHealthCheck();
         });
 
-        if (autoPlay) {
-          try {
-            player.play();
-          } catch (e) {
-            setStatus("paused");
+        player.on(mpegts.Events.STATISTICS_INFO, () => {
+          // Stream is flowing, ensure playback
+          if (autoPlay && video.paused) {
+            video.play().catch(() => {});
           }
+        });
+
+        if (autoPlay) {
+          setTimeout(() => {
+            try {
+              player.play();
+            } catch (e) {
+              console.log("Initial play failed:", e);
+              setStatus("paused");
+            }
+          }, 500);
         }
 
         mpegtsRef.current = player;
@@ -267,7 +338,19 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     };
 
     const handleWaiting = () => {
+      console.log("Video waiting for data");
       setStatus("loading");
+      // If waiting too long, try to recover
+      setTimeout(() => {
+        if (video && video.readyState < 3 && status === "loading") {
+          console.log("Waiting timeout - attempting recovery");
+          if (hlsRef.current) {
+            hlsRef.current.startLoad();
+          } else if (mpegtsRef.current) {
+            video.play().catch(() => {});
+          }
+        }
+      }, 8000);
     };
 
     const handleError = () => {
@@ -344,7 +427,21 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     if (isPlaying) {
       videoRef.current.pause();
     } else {
-      videoRef.current.play();
+      const playPromise = videoRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((error) => {
+          console.log("Play failed:", error);
+          // Try to recover
+          if (hlsRef.current) {
+            hlsRef.current.startLoad();
+            setTimeout(() => {
+              videoRef.current?.play().catch(() => {});
+            }, 1000);
+          } else if (mpegtsRef.current) {
+            attemptReconnect();
+          }
+        });
+      }
     }
   };
 
