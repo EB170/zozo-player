@@ -192,20 +192,20 @@ export const VideoPlayerHybrid = ({
     }, {
       enableWorker: true,
       enableStashBuffer: true,
-      stashInitialSize: 2 * 1024 * 1024,      // 2MB buffer initial (agressif)
+      stashInitialSize: 4 * 1024 * 1024,      // 4MB buffer initial pour stabilité maximale
       autoCleanupSourceBuffer: true,
-      autoCleanupMaxBackwardDuration: 40,     // Garder plus d'historique
-      autoCleanupMinBackwardDuration: 20,     // Plus de marge encore
-      liveBufferLatencyChasing: false,        // DÉSACTIVÉ pour stabilité maximale
-      liveBufferLatencyMaxLatency: 12,        // Très tolérant
-      liveBufferLatencyMinRemain: 4,          // Garder 4s minimum
+      autoCleanupMaxBackwardDuration: 60,     // 60s historique
+      autoCleanupMinBackwardDuration: 30,     // 30s minimum
+      liveBufferLatencyChasing: false,        // DÉSACTIVÉ pour stabilité
+      liveBufferLatencyMaxLatency: 15,        // Très tolérant
+      liveBufferLatencyMinRemain: 6,          // Garder 6s minimum
       fixAudioTimestampGap: true,
-      lazyLoad: false,
-      lazyLoadMaxDuration: 5 * 60,            // 5 min cache
-      lazyLoadRecoverDuration: 40,            // 40s recovery
+      lazyLoad: false,                        // Désactivé pour prefetch immédiat
       deferLoadAfterSourceOpen: false,
-      accurateSeek: false,                    // Désactiver seek précis pour perf
-      seekType: 'range'                       // Range seek plus rapide
+      accurateSeek: false,
+      seekType: 'range',
+      isLive: true,
+      reuseRedirectedURL: true
     });
     player.on(mpegts.Events.ERROR, (errorType: string, errorDetail: any) => {
       console.error('🔴 MPEGTS Error:', errorType, errorDetail);
@@ -232,7 +232,7 @@ export const VideoPlayerHybrid = ({
     player.load();
     mpegtsRef.current = player;
     
-    // Watchdog: surveiller le buffer et FPS, auto-recovery si critique
+    // Watchdog: plus réactif pour détecter et corriger rapidement
     const watchdogInterval = setInterval(() => {
       if (!video || video.readyState < 2) return;
       
@@ -240,11 +240,10 @@ export const VideoPlayerHybrid = ({
         ? video.buffered.end(0) - video.currentTime 
         : 0;
       
-      // Si buffer critique (<0.5s) ET vidéo pas en pause volontaire
-      if (bufferLevel < 0.5 && !video.paused) {
-        console.warn('🚨 Buffer critique détecté, tentative de recovery...');
+      // Si buffer critique (<1s) ET vidéo pas en pause volontaire
+      if (bufferLevel < 1.0 && !video.paused) {
+        console.warn(`🚨 Buffer critique (${bufferLevel.toFixed(2)}s), recovery...`);
         try {
-          // Forcer rechargement des segments
           if (player && typeof player.unload === 'function') {
             player.unload();
             player.load();
@@ -255,11 +254,11 @@ export const VideoPlayerHybrid = ({
         }
       }
       
-      // Si vidéo gelée (pas en pause mais pas de timeUpdate depuis 3s)
+      // Si vidéo gelée (pas en pause mais pas de timeUpdate depuis 2s)
       const now = Date.now();
       if (!video.paused && video.currentTime === (video as any)._lastCurrentTime) {
         const frozenTime = now - ((video as any)._lastTimeUpdate || now);
-        if (frozenTime > 3000) {
+        if (frozenTime > 2000) {
           console.warn('🚨 Vidéo gelée détectée, tentative play()...');
           video.play().catch(() => {});
           (video as any)._lastTimeUpdate = now;
@@ -268,7 +267,7 @@ export const VideoPlayerHybrid = ({
         (video as any)._lastCurrentTime = video.currentTime;
         (video as any)._lastTimeUpdate = now;
       }
-    }, 2000);
+    }, 1500);
     
     // Stocker watchdog pour cleanup
     (player as any)._watchdogInterval = watchdogInterval;
