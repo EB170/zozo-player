@@ -6,86 +6,89 @@ const corsHeaders = {
   'Access-Control-Expose-Headers': 'content-length, content-type, content-range, accept-ranges',
 };
 
-// Session cache to maintain cookies across requests
-const sessionCache = new Map<string, { cookies: string[], timestamp: number }>();
-const SESSION_LIFETIME = 3600000; // 1 hour
-
-// Extract cookies from response
-function extractCookies(response: Response): string[] {
-  const cookies: string[] = [];
-  const setCookieHeaders = response.headers.get('set-cookie');
-  if (setCookieHeaders) {
-    cookies.push(setCookieHeaders);
-  }
-  return cookies;
+// Extract MAC address from URL
+function extractMacFromUrl(url: string): string | null {
+  const match = url.match(/mac=([0-9A-Fa-f:]+)/);
+  return match ? match[1] : null;
 }
 
-// Build comprehensive browser-like headers
-function buildBrowserHeaders(streamUrl: string, cookies?: string[]): Record<string, string> {
+// Generate realistic residential IP
+function generateResidentialIP(): string {
+  // Common residential IP ranges
+  const ranges = [
+    '78.', '90.', '92.', '86.', '176.', '188.', // European ISP ranges
+    '82.', '84.', '91.', '109.', '217.',
+  ];
+  const prefix = ranges[Math.floor(Math.random() * ranges.length)];
+  const octet2 = Math.floor(Math.random() * 256);
+  const octet3 = Math.floor(Math.random() * 256);
+  const octet4 = Math.floor(Math.random() * 256);
+  return `${prefix}${octet2}.${octet3}.${octet4}`;
+}
+
+// Build IPTV player headers
+function buildIPTVHeaders(streamUrl: string): Record<string, string> {
   const urlObj = new URL(streamUrl);
+  const mac = extractMacFromUrl(streamUrl);
+  const fakeIP = generateResidentialIP();
+  
   const headers: Record<string, string> = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    // Simulate IPTV STB (Set-Top-Box) player
+    'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
     'Accept': '*/*',
-    'Accept-Language': 'en-US,en;q=0.9,fr;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.8',
     'Accept-Encoding': 'identity',
     'Connection': 'keep-alive',
-    'Origin': urlObj.origin,
-    'Referer': urlObj.origin + '/',
-    'Sec-Fetch-Dest': 'video',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'Cache-Control': 'no-cache',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
     'Pragma': 'no-cache',
+    'DNT': '1',
+    
+    // IPTV specific headers
+    'X-Forwarded-For': fakeIP,
+    'X-Real-IP': fakeIP,
+    'X-Client-IP': fakeIP,
+    'CF-Connecting-IP': fakeIP,
+    'True-Client-IP': fakeIP,
+    
+    // Origin and Referer
+    'Origin': urlObj.origin,
+    'Referer': `${urlObj.origin}/`,
+    
+    // Additional headers for MAG boxes
+    'X-User-Agent': 'Model: MAG250; Link: WiFi',
   };
-
-  if (cookies && cookies.length > 0) {
-    headers['Cookie'] = cookies.join('; ');
+  
+  if (mac) {
+    headers['X-MAC-Address'] = mac;
   }
-
+  
   return headers;
 }
 
-// Establish session by making initial request to the origin
-async function establishSession(streamUrl: string): Promise<string[]> {
-  const urlObj = new URL(streamUrl);
-  const originUrl = `${urlObj.protocol}//${urlObj.host}`;
-  
-  console.log('Establishing session with origin:', originUrl);
-  
-  try {
-    const response = await fetch(originUrl, {
-      headers: buildBrowserHeaders(originUrl),
-      redirect: 'follow',
-    });
+// Parse and proxy m3u8 playlist
+async function proxyM3U8(content: string, baseUrl: string, proxyBaseUrl: string): Promise<string> {
+  const lines = content.split('\n');
+  const proxiedLines = lines.map(line => {
+    // Skip comments and empty lines
+    if (line.startsWith('#') || line.trim() === '') {
+      return line;
+    }
     
-    const cookies = extractCookies(response);
-    console.log('Session established, cookies:', cookies.length);
-    return cookies;
-  } catch (error) {
-    console.error('Failed to establish session:', error);
-    return [];
-  }
-}
-
-// Get or create session for a domain
-async function getSession(streamUrl: string): Promise<string[]> {
-  const urlObj = new URL(streamUrl);
-  const domain = urlObj.host;
+    // Proxy URLs in the playlist
+    if (line.trim().startsWith('http://') || line.trim().startsWith('https://')) {
+      return `${proxyBaseUrl}?url=${encodeURIComponent(line.trim())}`;
+    }
+    
+    // Handle relative URLs
+    if (!line.startsWith('#') && line.trim() !== '') {
+      const absoluteUrl = new URL(line.trim(), baseUrl).toString();
+      return `${proxyBaseUrl}?url=${encodeURIComponent(absoluteUrl)}`;
+    }
+    
+    return line;
+  });
   
-  // Check cache
-  const cached = sessionCache.get(domain);
-  const now = Date.now();
-  
-  if (cached && (now - cached.timestamp) < SESSION_LIFETIME) {
-    console.log('Using cached session for domain:', domain);
-    return cached.cookies;
-  }
-  
-  // Establish new session
-  const cookies = await establishSession(streamUrl);
-  sessionCache.set(domain, { cookies, timestamp: now });
-  
-  return cookies;
+  return proxiedLines.join('\n');
 }
 
 serve(async (req) => {
@@ -108,108 +111,128 @@ serve(async (req) => {
       );
     }
 
-    console.log('Proxying stream:', streamUrl);
-
-    // Get session cookies
-    const cookies = await getSession(streamUrl);
+    console.log('Proxying IPTV stream:', streamUrl);
     
-    // Build request headers
-    const forwardHeaders = buildBrowserHeaders(streamUrl, cookies);
+    // Build IPTV-specific headers
+    const forwardHeaders = buildIPTVHeaders(streamUrl);
     
     // Forward range header if present
     const range = req.headers.get('range');
     if (range) {
       forwardHeaders['Range'] = range;
+      console.log('Range request:', range);
     }
 
-    console.log('Fetching stream with headers:', Object.keys(forwardHeaders));
+    console.log('Using headers:', JSON.stringify(forwardHeaders, null, 2));
 
-    // Fetch with extended timeout and follow redirects
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
-
-    const response = await fetch(streamUrl, {
-      headers: forwardHeaders,
-      signal: controller.signal,
-      redirect: 'follow',
-    });
-
-    clearTimeout(timeoutId);
-
-    // Update session cookies if new ones are provided
-    const newCookies = extractCookies(response);
-    if (newCookies.length > 0) {
-      const urlObj = new URL(streamUrl);
-      const domain = urlObj.host;
-      sessionCache.set(domain, { cookies: newCookies, timestamp: Date.now() });
-      console.log('Updated session cookies for domain:', domain);
-    }
-
-    if (!response.ok) {
-      console.error('Stream fetch failed:', response.status, response.statusText);
-      
-      // If 502, try one more time with fresh session
-      if (response.status === 502) {
-        console.log('Got 502, clearing session and retrying...');
-        const urlObj = new URL(streamUrl);
-        sessionCache.delete(urlObj.host);
-        
-        // Retry with new session
-        const freshCookies = await getSession(streamUrl);
-        const retryHeaders = buildBrowserHeaders(streamUrl, freshCookies);
-        if (range) retryHeaders['Range'] = range;
-        
-        const retryResponse = await fetch(streamUrl, {
-          headers: retryHeaders,
+    // Multiple fetch attempts with different strategies
+    let response: Response | null = null;
+    let lastError: Error | null = null;
+    
+    const strategies = [
+      // Strategy 1: Direct fetch with IPTV headers
+      async () => {
+        console.log('Strategy 1: Direct IPTV fetch');
+        return await fetch(streamUrl, {
+          headers: forwardHeaders,
           redirect: 'follow',
         });
-        
-        if (!retryResponse.ok) {
-          return new Response(
-            JSON.stringify({ 
-              error: 'Stream unavailable after retry',
-              status: retryResponse.status,
-              statusText: retryResponse.statusText
-            }),
-            { 
-              status: retryResponse.status, 
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-            }
-          );
-        }
-        
-        // Use retry response
-        const responseHeaders = new Headers(corsHeaders);
-        const headersToForward = [
-          'content-type', 'content-length', 'content-range', 
-          'accept-ranges', 'cache-control', 'transfer-encoding'
-        ];
-        
-        headersToForward.forEach(header => {
-          const value = retryResponse.headers.get(header);
-          if (value) responseHeaders.set(header, value);
+      },
+      
+      // Strategy 2: Minimal headers
+      async () => {
+        console.log('Strategy 2: Minimal headers');
+        return await fetch(streamUrl, {
+          headers: {
+            'User-Agent': 'VLC/3.0.16 LibVLC/3.0.16',
+            'Accept': '*/*',
+            'Connection': 'keep-alive',
+          },
+          redirect: 'follow',
         });
+      },
+      
+      // Strategy 3: Browser-like
+      async () => {
+        console.log('Strategy 3: Browser-like');
+        return await fetch(streamUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': new URL(streamUrl).origin,
+          },
+          redirect: 'follow',
+        });
+      },
+    ];
 
-        return new Response(retryResponse.body, {
-          status: retryResponse.status,
-          headers: responseHeaders,
-        });
+    for (const strategy of strategies) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s per attempt
+        
+        response = await strategy();
+        clearTimeout(timeoutId);
+        
+        if (response.ok) {
+          console.log('Success with strategy, status:', response.status);
+          break;
+        } else {
+          console.log('Strategy failed with status:', response.status);
+          lastError = new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+      } catch (error) {
+        console.error('Strategy error:', error);
+        lastError = error as Error;
+        response = null;
       }
+    }
+
+    if (!response || !response.ok) {
+      const errorMessage = lastError?.message || 'All fetch strategies failed';
+      console.error('All strategies failed:', errorMessage);
       
       return new Response(
         JSON.stringify({ 
-          error: 'Failed to fetch stream',
-          status: response.status,
-          statusText: response.statusText
+          error: 'Stream inaccessible',
+          details: errorMessage,
+          info: 'Cette source IPTV nécessite une authentification spécifique ou est actuellement indisponible'
         }),
         { 
-          status: response.status, 
+          status: 502, 
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         }
       );
     }
 
-    // Forward successful response
+    // Check content type
+    const contentType = response.headers.get('content-type') || '';
+    console.log('Response content-type:', contentType);
+    
+    // If it's a playlist, proxy the URLs in it
+    if (contentType.includes('application/vnd.apple.mpegurl') || 
+        contentType.includes('application/x-mpegURL') ||
+        streamUrl.includes('.m3u8')) {
+      console.log('Detected m3u8 playlist, proxying URLs...');
+      
+      const playlistContent = await response.text();
+      const baseUrl = streamUrl.substring(0, streamUrl.lastIndexOf('/') + 1);
+      const proxyBaseUrl = `${url.origin}${url.pathname}`;
+      
+      const proxiedPlaylist = await proxyM3U8(playlistContent, baseUrl, proxyBaseUrl);
+      
+      return new Response(proxiedPlaylist, {
+        status: 200,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/vnd.apple.mpegurl',
+          'Cache-Control': 'no-cache',
+        },
+      });
+    }
+
+    // Forward response headers
     const responseHeaders = new Headers(corsHeaders);
     
     const headersToForward = [
@@ -224,7 +247,7 @@ serve(async (req) => {
       }
     });
 
-    console.log('Streaming response, content-type:', response.headers.get('content-type'));
+    console.log('Streaming response');
 
     return new Response(response.body, {
       status: response.status,
@@ -236,7 +259,8 @@ serve(async (req) => {
     return new Response(
       JSON.stringify({ 
         error: error instanceof Error ? error.message : 'Unknown error',
-        type: error instanceof Error ? error.name : 'UnknownError'
+        type: error instanceof Error ? error.name : 'UnknownError',
+        info: 'Erreur lors du proxy du flux IPTV'
       }),
       { 
         status: 500, 
