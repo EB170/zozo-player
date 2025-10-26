@@ -1,15 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import videojs from "video.js";
 import "video.js/dist/video-js.css";
-import { Play, Pause, Volume2, VolumeX, Maximize, Loader2 } from "lucide-react";
+import { Play, Pause, Volume2, VolumeX, Maximize, Loader2, AlertCircle } from "lucide-react";
 import { Button } from "./ui/button";
 import { Slider } from "./ui/slider";
 import { cn } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
 
 interface VideoPlayerProps {
   streamUrl: string;
   autoPlay?: boolean;
 }
+
+// Helper function to proxy stream URLs through our backend
+const getProxiedUrl = (originalUrl: string): string => {
+  const projectId = "wxkvljkvqcamktlwfmfx";
+  const proxyUrl = `https://${projectId}.supabase.co/functions/v1/stream-proxy`;
+  return `${proxyUrl}?url=${encodeURIComponent(originalUrl)}`;
+};
 
 export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -20,10 +28,17 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [showControls, setShowControls] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
+  const { toast } = useToast();
 
   useEffect(() => {
     if (!videoRef.current) return;
+
+    setError(null);
+    const proxiedUrl = getProxiedUrl(streamUrl);
+    console.log('Original URL:', streamUrl);
+    console.log('Proxied URL:', proxiedUrl);
 
     // Initialize Video.js with aggressive live streaming options
     const player = videojs(videoRef.current, {
@@ -64,7 +79,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         liveTolerance: 45,
       },
       sources: [{
-        src: streamUrl,
+        src: proxiedUrl,
         type: streamUrl.includes('.m3u8') ? 'application/x-mpegURL' : 
               streamUrl.includes('.ts') ? 'video/mp2t' : 'application/x-mpegURL'
       }]
@@ -110,24 +125,18 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     });
 
     player.on('error', (e: any) => {
-      const error = player.error();
-      console.log('Video.js Error:', error);
+      const playerError = player.error();
+      console.error('Video.js Error:', playerError);
       
-      // Auto-recovery on error
-      setTimeout(() => {
-        console.log('Video.js: Attempting error recovery');
-        player.src({
-          src: streamUrl,
-          type: streamUrl.includes('.m3u8') ? 'application/x-mpegURL' : 
-                streamUrl.includes('.ts') ? 'video/mp2t' : 'application/x-mpegURL'
-        });
-        player.load();
-        if (autoPlay) {
-          player.play().catch((err: any) => {
-            console.log('Video.js: Play failed after recovery', err);
-          });
-        }
-      }, 2000);
+      const errorMessage = playerError?.message || 'Erreur de chargement du flux';
+      setError(errorMessage);
+      setIsLoading(false);
+      
+      toast({
+        title: "Erreur de lecture",
+        description: "Impossible de charger le flux. Vérifiez l'URL ou réessayez.",
+        variant: "destructive",
+      });
     });
 
     // Stall recovery
@@ -215,11 +224,24 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       </div>
 
       {/* Loading Overlay */}
-      {isLoading && (
+      {isLoading && !error && (
         <div className="absolute inset-0 flex items-center justify-center bg-[hsl(var(--player-bg))]/90 backdrop-blur-sm z-10">
           <div className="flex flex-col items-center gap-4">
             <Loader2 className="w-12 h-12 text-primary animate-spin" />
             <p className="text-sm text-muted-foreground">Connexion au flux...</p>
+          </div>
+        </div>
+      )}
+
+      {/* Error Overlay */}
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center bg-[hsl(var(--player-bg))]/90 backdrop-blur-sm z-10">
+          <div className="flex flex-col items-center gap-4 p-6 text-center">
+            <AlertCircle className="w-12 h-12 text-destructive" />
+            <div className="space-y-2">
+              <p className="text-sm font-semibold">Impossible de charger le flux</p>
+              <p className="text-xs text-muted-foreground">{error}</p>
+            </div>
           </div>
         </div>
       )}
