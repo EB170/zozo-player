@@ -64,6 +64,11 @@ export const VideoPlayerHybrid = ({
   const fragErrorCountRef = useRef(0);
   const isTransitioningRef = useRef(false);
   const hlsDebugMode = useRef(false); // Toggle pour debug HLS
+  const memoryCleanupIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const uptimeStartRef = useRef<number>(Date.now());
+  const lastMemoryCleanupRef = useRef<number>(Date.now());
+  const playbackQualityCheckRef = useRef<number>(0);
+  
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [volume, setVolume] = useState(1);
@@ -108,12 +113,22 @@ export const VideoPlayerHybrid = ({
       retryTimeoutRef.current = null;
     }
     
+    if (memoryCleanupIntervalRef.current) {
+      clearInterval(memoryCleanupIntervalRef.current);
+      memoryCleanupIntervalRef.current = null;
+    }
+    
     if (mpegtsRef.current) {
-      // Nettoyer watchdog si existant
+      // Nettoyer watchdog et maintenance si existants
       const watchdog = (mpegtsRef.current as any)._watchdogInterval;
       if (watchdog) {
         clearInterval(watchdog);
         (mpegtsRef.current as any)._watchdogInterval = null;
+      }
+      const maintenance = (mpegtsRef.current as any)._maintenanceInterval;
+      if (maintenance) {
+        clearInterval(maintenance);
+        (mpegtsRef.current as any)._maintenanceInterval = null;
       }
       
       try {
@@ -128,6 +143,13 @@ export const VideoPlayerHybrid = ({
     }
     
     if (hlsRef.current) {
+      // Nettoyer maintenance interval
+      const maintenance = (hlsRef.current as any)._maintenanceInterval;
+      if (maintenance) {
+        clearInterval(maintenance);
+        (hlsRef.current as any)._maintenanceInterval = null;
+      }
+      
       try {
         hlsRef.current.stopLoad();
         hlsRef.current.detachMedia();
@@ -272,6 +294,64 @@ export const VideoPlayerHybrid = ({
     // Stocker watchdog pour cleanup
     (player as any)._watchdogInterval = watchdogInterval;
     
+    // === MAINTENANCE LONG-TERME: nettoyage préventif tous les 20 min ===
+    const maintenanceInterval = setInterval(() => {
+      if (!video || !player) return;
+      
+      const uptimeMinutes = (Date.now() - uptimeStartRef.current) / 1000 / 60;
+      console.log(`🔧 Maintenance préventive (uptime: ${uptimeMinutes.toFixed(1)}min)`);
+      
+      try {
+        // Vérifier la qualité de lecture
+        const quality = (video as any).getVideoPlaybackQuality?.();
+        if (quality) {
+          const dropRate = quality.droppedVideoFrames / (quality.totalVideoFrames || 1);
+          playbackQualityCheckRef.current++;
+          
+          // Si taux de frames perdus > 5% après plusieurs checks, soft reload
+          if (dropRate > 0.05 && playbackQualityCheckRef.current > 3) {
+            console.warn(`⚠️ Qualité dégradée (${(dropRate * 100).toFixed(1)}% frames perdus), soft reload...`);
+            try {
+              const currentTime = video.currentTime;
+              player.unload();
+              player.load();
+              video.currentTime = currentTime;
+              video.play().catch(() => {});
+              playbackQualityCheckRef.current = 0;
+            } catch (e) {
+              console.error('Soft reload failed:', e);
+            }
+          }
+        }
+        
+        // Nettoyage buffers manuels si disponible
+        if (video.buffered.length > 0) {
+          const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+          const bufferedStart = video.buffered.start(0);
+          const totalBuffered = bufferedEnd - bufferedStart;
+          
+          // Si plus de 90s buffered, forcer cleanup
+          if (totalBuffered > 90) {
+            console.log(`🧹 Buffer trop grand (${totalBuffered.toFixed(1)}s), cleanup...`);
+            try {
+              const currentTime = video.currentTime;
+              player.unload();
+              player.load();
+              video.currentTime = currentTime;
+              video.play().catch(() => {});
+            } catch (e) {}
+          }
+        }
+        
+        lastMemoryCleanupRef.current = Date.now();
+      } catch (e) {
+        console.warn('Maintenance error:', e);
+      }
+    }, 20 * 60 * 1000); // 20 minutes
+    
+    (player as any)._maintenanceInterval = maintenanceInterval;
+    memoryCleanupIntervalRef.current = maintenanceInterval;
+    
     if (autoPlay) {
       setTimeout(() => {
         video.play().then(() => {
@@ -307,19 +387,19 @@ export const VideoPlayerHybrid = ({
       debug: hlsDebugMode.current,
       enableWorker: true,
       
-      // ========== BUFFER OPTIMISÉ STABILITÉ ==========
-      maxBufferLength: 60,              // 60s buffer pour stabilité maximale
-      maxMaxBufferLength: 90,           // Cap à 90s
-      maxBufferSize: 60 * 1000 * 1000,  // 60MB
-      maxBufferHole: 0.7,               // Tolérance 700ms pour éviter skip
+      // ========== BUFFER OPTIMISÉ LONG-TERME ==========
+      maxBufferLength: 45,              // 45s optimal pour long-terme (évite trop de mémoire)
+      maxMaxBufferLength: 60,           // Cap à 60s
+      maxBufferSize: 50 * 1000 * 1000,  // 50MB (évite saturation mémoire)
+      maxBufferHole: 0.5,               // Tolérance 500ms
       
       // ========== LIVE SYNC ==========
       liveSyncDurationCount: 3,         // 3 fragments du live
       liveMaxLatencyDurationCount: 6,   // Max 6 segments de retard
       liveDurationInfinity: false,
       
-      // ========== BACK BUFFER ==========
-      backBufferLength: 10,             // 10s en arrière
+      // ========== BACK BUFFER (NETTOYAGE AUTO) ==========
+      backBufferLength: 15,             // 15s en arrière (sera nettoyé auto)
       
       // ========== CHARGEMENT ROBUSTE ==========
       manifestLoadingTimeOut: 10000,
@@ -489,6 +569,50 @@ export const VideoPlayerHybrid = ({
     hls.on(Hls.Events.BUFFER_APPENDED, () => {
       setIsLoading(false);
     });
+    
+    // === MAINTENANCE LONG-TERME HLS: vérification périodique ===
+    const hlsMaintenanceInterval = setInterval(() => {
+      if (!video || !hls) return;
+      
+      const uptimeMinutes = (Date.now() - uptimeStartRef.current) / 1000 / 60;
+      
+      // Vérifier la santé du player tous les 15 min
+      if (uptimeMinutes > 15 && uptimeMinutes % 15 < 0.5) {
+        console.log(`🔧 HLS Maintenance (uptime: ${uptimeMinutes.toFixed(1)}min)`);
+        
+        try {
+          // Vérifier qualité playback
+          const quality = (video as any).getVideoPlaybackQuality?.();
+          if (quality) {
+            const dropRate = quality.droppedVideoFrames / (quality.totalVideoFrames || 1);
+            
+            if (dropRate > 0.08) { // Seuil 8% pour HLS
+              console.warn(`⚠️ HLS qualité dégradée, recoverMediaError...`);
+              try {
+                hls.recoverMediaError();
+              } catch (e) {}
+            }
+          }
+          
+          // Vérifier si le buffer est sain
+          const bufferInfo = hls.media?.buffered;
+          if (bufferInfo && bufferInfo.length > 0) {
+            const totalBuffered = bufferInfo.end(bufferInfo.length - 1) - bufferInfo.start(0);
+            if (totalBuffered > 120) { // Si >2min buffered
+              console.log('🧹 HLS buffer cleanup...');
+              const currentTime = video.currentTime;
+              hls.stopLoad();
+              hls.startLoad(currentTime - 5);
+            }
+          }
+        } catch (e) {
+          console.warn('HLS maintenance error:', e);
+        }
+      }
+    }, 60 * 1000); // Vérifier chaque minute
+    
+    (hls as any)._maintenanceInterval = hlsMaintenanceInterval;
+    memoryCleanupIntervalRef.current = hlsMaintenanceInterval;
     hls.loadSource(getProxiedUrl(streamUrl));
     hls.attachMedia(video);
     hlsRef.current = hls;
@@ -740,7 +864,10 @@ export const VideoPlayerHybrid = ({
     const isFirstMount = !hlsRef.current && !mpegtsRef.current;
     
     if (isFirstMount) {
-      // Premier mount : init normale
+      // Premier mount : init normale + reset uptime
+      uptimeStartRef.current = Date.now();
+      lastMemoryCleanupRef.current = Date.now();
+      playbackQualityCheckRef.current = 0;
       initPlayer();
     } else {
       // Changement URL : utiliser swap optimisé pour HLS
