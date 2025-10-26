@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import mpegts from "mpegts.js";
 import Hls from "hls.js";
-import { Play, Pause, Volume2, VolumeX, Maximize, Loader2, AlertCircle } from "lucide-react";
+import { Play, Pause, Volume2, VolumeX, Maximize, Loader2 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Slider } from "./ui/slider";
 
@@ -17,29 +17,44 @@ const getProxiedUrl = (originalUrl: string): string => {
 };
 
 export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const mpegtsRef = useRef<any>(null);
-  const hlsRef = useRef<Hls | null>(null);
-  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Double video system pour transitions seamless
+  const video1Ref = useRef<HTMLVideoElement>(null);
+  const video2Ref = useRef<HTMLVideoElement>(null);
+  const activeVideoRef = useRef<1 | 2>(1);
+  
+  const mpegts1Ref = useRef<any>(null);
+  const mpegts2Ref = useRef<any>(null);
+  const hls1Ref = useRef<Hls | null>(null);
+  const hls2Ref = useRef<Hls | null>(null);
+  
+  const switchTimerRef = useRef<NodeJS.Timeout | null>(null);
   const healthCheckRef = useRef<NodeJS.Timeout | null>(null);
   const useProxyRef = useRef(false);
-  const lastTimeUpdateRef = useRef(0);
-  const frozenCountRef = useRef(0);
-  const currentPlayerTypeRef = useRef<'mpegts' | 'hls' | null>(null);
+  const playerTypeRef = useRef<'mpegts' | 'hls'>('mpegts');
+  const lastTimeRef = useRef(0);
+  const stallCountRef = useRef(0);
+  const isInitializedRef = useRef(false);
   
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [showControls, setShowControls] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
 
+  const getActiveVideo = () => {
+    return activeVideoRef.current === 1 ? video1Ref.current : video2Ref.current;
+  };
+
+  const getBackupVideo = () => {
+    return activeVideoRef.current === 1 ? video2Ref.current : video1Ref.current;
+  };
+
   const cleanup = () => {
-    if (reconnectTimerRef.current) {
-      clearInterval(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
+    if (switchTimerRef.current) {
+      clearInterval(switchTimerRef.current);
+      switchTimerRef.current = null;
     }
     
     if (healthCheckRef.current) {
@@ -47,75 +62,29 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       healthCheckRef.current = null;
     }
     
-    if (mpegtsRef.current) {
-      try {
-        mpegtsRef.current.unload();
-        mpegtsRef.current.detachMediaElement();
-        mpegtsRef.current.destroy();
-      } catch (e) {
-        console.log('MPEGTS cleanup error:', e);
+    [mpegts1Ref, mpegts2Ref].forEach(ref => {
+      if (ref.current) {
+        try {
+          ref.current.unload();
+          ref.current.detachMediaElement();
+          ref.current.destroy();
+        } catch (e) {}
+        ref.current = null;
       }
-      mpegtsRef.current = null;
-    }
+    });
     
-    if (hlsRef.current) {
-      try {
-        hlsRef.current.destroy();
-      } catch (e) {
-        console.log('HLS cleanup error:', e);
+    [hls1Ref, hls2Ref].forEach(ref => {
+      if (ref.current) {
+        try {
+          ref.current.destroy();
+        } catch (e) {}
+        ref.current = null;
       }
-      hlsRef.current = null;
-    }
-    
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.removeAttribute('src');
-      videoRef.current.load();
-    }
+    });
   };
 
-  // Système de monitoring de santé du flux
-  const startHealthMonitoring = () => {
-    if (healthCheckRef.current) {
-      clearInterval(healthCheckRef.current);
-    }
-    
-    lastTimeUpdateRef.current = Date.now();
-    frozenCountRef.current = 0;
-
-    healthCheckRef.current = setInterval(() => {
-      if (!videoRef.current) return;
-      
-      const video = videoRef.current;
-      const now = Date.now();
-      const timeSinceLastUpdate = now - lastTimeUpdateRef.current;
-      
-      // Si le flux est gelé pendant plus de 5 secondes
-      if (!video.paused && timeSinceLastUpdate > 5000) {
-        frozenCountRef.current++;
-        console.warn(`⚠️ Stream frozen detected (${frozenCountRef.current})`);
-        
-        if (frozenCountRef.current >= 2) {
-          console.log('🔄 Forcing reconnect due to frozen stream');
-          frozenCountRef.current = 0;
-          initPlayer();
-        }
-      }
-      
-      // Reset le compteur si tout va bien
-      if (timeSinceLastUpdate < 3000) {
-        frozenCountRef.current = 0;
-      }
-    }, 3000);
-  };
-
-  const createMpegtsPlayer = () => {
-    if (!videoRef.current) return null;
-    
-    const video = videoRef.current;
+  const createMpegtsPlayer = (videoElement: HTMLVideoElement) => {
     const url = useProxyRef.current ? getProxiedUrl(streamUrl) : streamUrl;
-    
-    console.log(`🎬 Creating MPEGTS player (${useProxyRef.current ? 'PROXY' : 'DIRECT'})`);
     
     const player = mpegts.createPlayer({
       type: 'mpegts',
@@ -126,267 +95,272 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     }, {
       enableWorker: true,
       enableStashBuffer: true,
-      stashInitialSize: 512,
+      stashInitialSize: 1024, // Buffer plus grand pour 0 saccade
       autoCleanupSourceBuffer: true,
-      autoCleanupMaxBackwardDuration: 12,
-      autoCleanupMinBackwardDuration: 4,
-      liveBufferLatencyChasing: false,
+      autoCleanupMaxBackwardDuration: 15,
+      autoCleanupMinBackwardDuration: 5,
+      liveBufferLatencyChasing: true, // Chasing activé pour low latency
+      liveBufferLatencyMaxLatency: 3,
+      liveBufferLatencyMinRemain: 0.5,
       fixAudioTimestampGap: true,
       lazyLoad: false,
-      lazyLoadMaxDuration: 3 * 60,
-      lazyLoadRecoverDuration: 30,
     });
 
-    // Gestion des erreurs avec fallback intelligent
     player.on(mpegts.Events.ERROR, (errorType: string, errorDetail: any) => {
-      console.log(`⚠️ MPEGTS Error: ${errorType} - ${errorDetail}`);
+      console.log(`⚠️ Error: ${errorType}`);
       
-      // Erreur réseau -> essayer le proxy
       if (!useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
-        console.log('🔄 Switching to PROXY mode...');
         useProxyRef.current = true;
-        setTimeout(() => initPlayer(), 100);
-        return;
-      }
-      
-      // Si déjà en proxy et erreur -> essayer HLS
-      if (useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
-        console.log('🔄 Trying HLS fallback...');
-        currentPlayerTypeRef.current = 'hls';
-        setTimeout(() => initPlayer(), 100);
-        return;
-      }
-      
-      // Autres erreurs -> reconnexion
-      if (errorType === mpegts.ErrorTypes.MEDIA_ERROR) {
-        console.log('🔄 Media error, reconnecting...');
-        setTimeout(() => initPlayer(), 500);
+        setTimeout(() => initDoubleBuffer(), 50);
+      } else if (useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
+        playerTypeRef.current = 'hls';
+        setTimeout(() => initDoubleBuffer(), 50);
       }
     });
 
-    player.attachMediaElement(video);
+    player.attachMediaElement(videoElement);
     player.load();
     
-    video.volume = volume;
-    video.muted = isMuted;
-    
-    if (autoPlay) {
-      video.play().then(() => {
-        setIsPlaying(true);
-        setIsLoading(false);
-        setError(null);
-        startHealthMonitoring();
-      }).catch((e) => {
-        console.log('Play error:', e);
-        setIsLoading(false);
-      });
-    } else {
-      setIsLoading(false);
-    }
-
     return player;
   };
 
-  const createHlsPlayer = () => {
-    if (!videoRef.current || !Hls.isSupported()) {
-      console.log('HLS not supported, falling back to MPEGTS');
-      currentPlayerTypeRef.current = 'mpegts';
-      return null;
-    }
+  const createHlsPlayer = (videoElement: HTMLVideoElement) => {
+    if (!Hls.isSupported()) return null;
     
-    const video = videoRef.current;
     const url = getProxiedUrl(streamUrl);
-    
-    console.log('🎬 Creating HLS player (PROXY)');
     
     const hls = new Hls({
       debug: false,
       enableWorker: true,
       lowLatencyMode: true,
-      backBufferLength: 10,
-      maxBufferLength: 30,
-      maxBufferSize: 60 * 1000 * 1000,
-      maxBufferHole: 0.5,
-      manifestLoadingTimeOut: 10000,
-      fragLoadingTimeOut: 20000,
-      manifestLoadingMaxRetry: 3,
-      fragLoadingMaxRetry: 6,
-      manifestLoadingRetryDelay: 500,
-      levelLoadingRetryDelay: 500,
-      fragLoadingRetryDelay: 500,
+      backBufferLength: 15,
+      maxBufferLength: 40, // Buffer plus long
+      maxBufferSize: 80 * 1000 * 1000,
+      maxBufferHole: 0.3,
+      highBufferWatchdogPeriod: 1,
+      nudgeOffset: 0.1,
+      nudgeMaxRetry: 5,
+      maxFragLookUpTolerance: 0.1,
+      liveSyncDurationCount: 2, // Sync rapide
+      liveMaxLatencyDurationCount: 4,
+      manifestLoadingTimeOut: 8000,
+      fragLoadingTimeOut: 15000,
+      manifestLoadingMaxRetry: 4,
+      fragLoadingMaxRetry: 8,
     });
 
     hls.on(Hls.Events.ERROR, (event, data) => {
       if (data.fatal) {
-        console.log(`❌ HLS fatal error: ${data.type} - ${data.details}`);
-        
-        switch(data.type) {
-          case Hls.ErrorTypes.NETWORK_ERROR:
-            console.log('🔄 HLS network error, trying to recover...');
-            hls.startLoad();
-            break;
-          case Hls.ErrorTypes.MEDIA_ERROR:
-            console.log('🔄 HLS media error, trying to recover...');
-            hls.recoverMediaError();
-            break;
-          default:
-            // Si HLS échoue, retour à MPEGTS
-            console.log('🔄 HLS failed, falling back to MPEGTS');
-            currentPlayerTypeRef.current = 'mpegts';
-            setTimeout(() => initPlayer(), 500);
-            break;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          hls.startLoad();
+        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          hls.recoverMediaError();
+        } else {
+          playerTypeRef.current = 'mpegts';
+          setTimeout(() => initDoubleBuffer(), 50);
         }
       }
     });
 
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      console.log('✅ HLS manifest parsed');
-      video.play().then(() => {
-        setIsPlaying(true);
-        setIsLoading(false);
-        setError(null);
-        startHealthMonitoring();
-      }).catch((e) => {
-        console.log('HLS play error:', e);
-        setIsLoading(false);
-      });
-    });
-
     hls.loadSource(url);
-    hls.attachMedia(video);
+    hls.attachMedia(videoElement);
     
-    video.volume = volume;
-    video.muted = isMuted;
-
     return hls;
   };
 
-  const initPlayer = () => {
-    if (!videoRef.current) return;
+  const prepareVideo = (videoElement: HTMLVideoElement, playerRef: any, hlsRefObj: any) => {
+    if (!videoElement) return;
+    
+    videoElement.volume = volume;
+    videoElement.muted = isMuted;
+    
+    if (playerTypeRef.current === 'mpegts') {
+      const player = createMpegtsPlayer(videoElement);
+      playerRef.current = player;
+    } else {
+      const hls = createHlsPlayer(videoElement);
+      hlsRefObj.current = hls;
+    }
+  };
+
+  const switchToBackup = () => {
+    const activeVideo = getActiveVideo();
+    const backupVideo = getBackupVideo();
+    
+    if (!activeVideo || !backupVideo) return;
+    
+    // Préparer le backup
+    if (activeVideoRef.current === 1) {
+      prepareVideo(backupVideo, mpegts2Ref, hls2Ref);
+    } else {
+      prepareVideo(backupVideo, mpegts1Ref, hls1Ref);
+    }
+    
+    // Attendre que le backup soit prêt
+    const checkReady = setInterval(() => {
+      if (backupVideo.readyState >= 2) { // HAVE_CURRENT_DATA
+        clearInterval(checkReady);
+        
+        // Transition fluide
+        backupVideo.currentTime = activeVideo.currentTime;
+        backupVideo.play().then(() => {
+          // Swap instantané
+          activeVideo.style.opacity = '0';
+          backupVideo.style.opacity = '1';
+          
+          setTimeout(() => {
+            activeVideo.pause();
+            activeVideoRef.current = activeVideoRef.current === 1 ? 2 : 1;
+          }, 50);
+        });
+      }
+    }, 50);
+    
+    // Timeout de sécurité
+    setTimeout(() => clearInterval(checkReady), 2000);
+  };
+
+  const initDoubleBuffer = () => {
+    if (!video1Ref.current || !video2Ref.current) return;
     
     cleanup();
     setIsLoading(true);
     
-    // Choisir le player selon la stratégie
-    const playerType = currentPlayerTypeRef.current || 'mpegts';
+    // Init video 1 (active)
+    const video1 = video1Ref.current;
+    video1.style.opacity = '1';
+    video1.style.zIndex = '2';
+    prepareVideo(video1, mpegts1Ref, hls1Ref);
     
-    if (playerType === 'hls') {
-      const hls = createHlsPlayer();
-      if (hls) {
-        hlsRef.current = hls;
-      } else {
-        // Fallback to mpegts if HLS creation failed
-        const mpegts = createMpegtsPlayer();
-        if (mpegts) {
-          mpegtsRef.current = mpegts;
-          currentPlayerTypeRef.current = 'mpegts';
-        }
-      }
-    } else {
-      const mpegts = createMpegtsPlayer();
-      if (mpegts) {
-        mpegtsRef.current = mpegts;
-        currentPlayerTypeRef.current = 'mpegts';
-      }
+    if (autoPlay) {
+      // Démarrage INSTANTANÉ - 0 délai
+      const attemptPlay = () => {
+        video1.play().then(() => {
+          setIsPlaying(true);
+          setIsLoading(false);
+          
+          // Précharger video 2 en arrière-plan immédiatement
+          setTimeout(() => {
+            const video2 = video2Ref.current;
+            if (video2) {
+              video2.style.opacity = '0';
+              video2.style.zIndex = '1';
+              prepareVideo(video2, mpegts2Ref, hls2Ref);
+            }
+          }, 1000);
+        }).catch(() => {
+          // Retry immédiat
+          setTimeout(attemptPlay, 100);
+        });
+      };
+      
+      // Démarrage immédiat
+      setTimeout(attemptPlay, 0);
     }
-
-    // Reconnexion proactive toutes les 20 secondes
-    reconnectTimerRef.current = setInterval(() => {
-      if (!videoRef.current) return;
-      
-      console.log('🔄 Proactive reconnect (20s)');
-      
-      const video = videoRef.current;
-      const wasPlaying = !video.paused;
-      
-      // Nettoyer le player actuel
-      if (currentPlayerTypeRef.current === 'mpegts' && mpegtsRef.current) {
-        try {
-          mpegtsRef.current.unload();
-          mpegtsRef.current.detachMediaElement();
-          mpegtsRef.current.destroy();
-        } catch (e) {}
-        
-        const newPlayer = createMpegtsPlayer();
-        if (newPlayer) {
-          mpegtsRef.current = newPlayer;
-        }
-      } else if (currentPlayerTypeRef.current === 'hls' && hlsRef.current) {
-        try {
-          hlsRef.current.destroy();
-        } catch (e) {}
-        
-        const newPlayer = createHlsPlayer();
-        if (newPlayer) {
-          hlsRef.current = newPlayer;
-        }
-      }
-      
-      if (wasPlaying) {
-        video.play().catch(() => {});
-      }
-    }, 20000);
+    
+    isInitializedRef.current = true;
   };
 
-  // Suivre les timeupdate pour le monitoring
+  // Monitoring ultra-rapide
+  const startHealthMonitoring = () => {
+    if (healthCheckRef.current) clearInterval(healthCheckRef.current);
+    
+    lastTimeRef.current = Date.now();
+    stallCountRef.current = 0;
+    
+    healthCheckRef.current = setInterval(() => {
+      const activeVideo = getActiveVideo();
+      if (!activeVideo || activeVideo.paused) return;
+      
+      const now = Date.now();
+      const elapsed = now - lastTimeRef.current;
+      
+      // Détection stall ultra-rapide (2s)
+      if (elapsed > 2000) {
+        stallCountRef.current++;
+        console.warn(`⚠️ Stall detected (${stallCountRef.current})`);
+        
+        if (stallCountRef.current >= 2) {
+          console.log('🔄 Switching buffer');
+          stallCountRef.current = 0;
+          switchToBackup();
+        }
+      } else {
+        stallCountRef.current = 0;
+      }
+    }, 1000);
+  };
+
+  // Switch automatique seamless toutes les 15s
+  const startAutoSwitch = () => {
+    if (switchTimerRef.current) clearInterval(switchTimerRef.current);
+    
+    switchTimerRef.current = setInterval(() => {
+      console.log('🔄 Auto switch (15s)');
+      switchToBackup();
+    }, 15000);
+  };
+
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
+    const video1 = video1Ref.current;
+    const video2 = video2Ref.current;
+    
+    if (!video1 || !video2) return;
 
     const handleTimeUpdate = () => {
-      lastTimeUpdateRef.current = Date.now();
-    };
-
-    const handleWaiting = () => {
-      console.log('⏳ Video waiting for data...');
-      setIsLoading(true);
+      lastTimeRef.current = Date.now();
     };
 
     const handlePlaying = () => {
-      console.log('▶️ Video playing');
-      setIsLoading(false);
       setIsPlaying(true);
-    };
-
-    const handleError = () => {
-      console.log('❌ Video element error');
-      setError('Erreur de lecture');
       setIsLoading(false);
     };
 
-    video.addEventListener('timeupdate', handleTimeUpdate);
-    video.addEventListener('waiting', handleWaiting);
-    video.addEventListener('playing', handlePlaying);
-    video.addEventListener('error', handleError);
+    const handleWaiting = () => {
+      setIsLoading(true);
+    };
+
+    video1.addEventListener('timeupdate', handleTimeUpdate);
+    video2.addEventListener('timeupdate', handleTimeUpdate);
+    video1.addEventListener('playing', handlePlaying);
+    video2.addEventListener('playing', handlePlaying);
+    video1.addEventListener('waiting', handleWaiting);
+    video2.addEventListener('waiting', handleWaiting);
 
     return () => {
-      video.removeEventListener('timeupdate', handleTimeUpdate);
-      video.removeEventListener('waiting', handleWaiting);
-      video.removeEventListener('playing', handlePlaying);
-      video.removeEventListener('error', handleError);
+      video1.removeEventListener('timeupdate', handleTimeUpdate);
+      video2.removeEventListener('timeupdate', handleTimeUpdate);
+      video1.removeEventListener('playing', handlePlaying);
+      video2.removeEventListener('playing', handlePlaying);
+      video1.removeEventListener('waiting', handleWaiting);
+      video2.removeEventListener('waiting', handleWaiting);
     };
   }, []);
 
   useEffect(() => {
     if (!streamUrl) return;
     
-    // Reset pour nouvelle URL
     useProxyRef.current = false;
-    currentPlayerTypeRef.current = 'mpegts';
+    playerTypeRef.current = 'mpegts';
+    activeVideoRef.current = 1;
+    isInitializedRef.current = false;
     
-    initPlayer();
+    initDoubleBuffer();
+    startHealthMonitoring();
+    startAutoSwitch();
     
     return () => cleanup();
   }, [streamUrl]);
 
   const handlePlayPause = () => {
-    if (!videoRef.current) return;
+    const activeVideo = getActiveVideo();
+    if (!activeVideo) return;
     
     if (isPlaying) {
-      videoRef.current.pause();
+      activeVideo.pause();
       setIsPlaying(false);
     } else {
-      videoRef.current.play();
+      activeVideo.play();
       setIsPlaying(true);
     }
   };
@@ -394,26 +368,37 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const handleVolumeChange = (value: number[]) => {
     const newVolume = value[0];
     setVolume(newVolume);
-    if (videoRef.current) {
-      videoRef.current.volume = newVolume;
-      if (newVolume > 0 && isMuted) {
-        setIsMuted(false);
-        videoRef.current.muted = false;
+    
+    [video1Ref.current, video2Ref.current].forEach(video => {
+      if (video) {
+        video.volume = newVolume;
+        if (newVolume > 0 && isMuted) {
+          video.muted = false;
+        }
       }
+    });
+    
+    if (newVolume > 0 && isMuted) {
+      setIsMuted(false);
     }
   };
 
   const handleMuteToggle = () => {
-    if (!videoRef.current) return;
     const newMuted = !isMuted;
     setIsMuted(newMuted);
-    videoRef.current.muted = newMuted;
+    
+    [video1Ref.current, video2Ref.current].forEach(video => {
+      if (video) {
+        video.muted = newMuted;
+      }
+    });
   };
 
   const handleFullscreen = () => {
-    if (!videoRef.current) return;
-    if (videoRef.current.requestFullscreen) {
-      videoRef.current.requestFullscreen();
+    const activeVideo = getActiveVideo();
+    if (!activeVideo) return;
+    if (activeVideo.requestFullscreen) {
+      activeVideo.requestFullscreen();
     }
   };
 
@@ -435,33 +420,36 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       onMouseMove={handleMouseMove}
       onMouseLeave={() => isPlaying && setShowControls(false)}
     >
+      {/* Double video system - transitions invisibles */}
       <video
-        ref={videoRef}
-        className="w-full h-full"
+        ref={video1Ref}
+        className="absolute inset-0 w-full h-full transition-opacity duration-300"
+        style={{ opacity: 0, zIndex: 1 }}
         playsInline
+        preload="auto"
+      />
+      
+      <video
+        ref={video2Ref}
+        className="absolute inset-0 w-full h-full transition-opacity duration-300"
+        style={{ opacity: 0, zIndex: 1 }}
+        playsInline
+        preload="auto"
       />
 
       {isLoading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/80">
+        <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
           <div className="flex flex-col items-center gap-3">
             <Loader2 className="w-12 h-12 text-primary animate-spin" />
-            <span className="text-sm text-muted-foreground">
-              {currentPlayerTypeRef.current === 'hls' ? 'HLS' : 'MPEGTS'} • 
-              {useProxyRef.current ? ' Proxy' : ' Direct'}
+            <span className="text-xs text-muted-foreground">
+              {playerTypeRef.current.toUpperCase()} • {useProxyRef.current ? 'Proxy' : 'Direct'}
             </span>
           </div>
         </div>
       )}
 
-      {error && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-destructive/90 text-destructive-foreground px-4 py-2 rounded-lg flex items-center gap-2">
-          <AlertCircle className="w-4 h-4" />
-          <span className="text-sm">{error}</span>
-        </div>
-      )}
-
       {showControls && (
-        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent p-4 space-y-3">
+        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent p-4 space-y-3 z-20">
           <div className="flex items-center gap-3">
             <Button
               size="icon"
