@@ -30,6 +30,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const [showControls, setShowControls] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
+  const loadingTimeoutRef = useRef<NodeJS.Timeout>();
   const { toast } = useToast();
 
   useEffect(() => {
@@ -91,22 +92,50 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     player.on('loadstart', () => {
       console.log('Video.js: Load started');
       setIsLoading(true);
+      
+      // Set timeout to show error if loading takes too long
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+      }
+      loadingTimeoutRef.current = setTimeout(() => {
+        if (isLoading) {
+          const errorMsg = 'Le flux vidéo ne répond pas. Vérifiez que l\'URL est correcte et accessible.';
+          setError(errorMsg);
+          setIsLoading(false);
+          player.pause();
+          
+          toast({
+            title: "Erreur de chargement",
+            description: errorMsg,
+            variant: "destructive",
+          });
+        }
+      }, 15000); // 15 seconds timeout
     });
 
     player.on('loadedmetadata', () => {
       console.log('Video.js: Metadata loaded');
       setIsLoading(false);
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+      }
     });
 
     player.on('canplay', () => {
       console.log('Video.js: Can play');
       setIsLoading(false);
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+      }
     });
 
     player.on('playing', () => {
       console.log('Video.js: Playing');
       setIsPlaying(true);
       setIsLoading(false);
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+      }
     });
 
     player.on('play', () => {
@@ -156,6 +185,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
     // Cleanup
     return () => {
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+      }
       if (playerRef.current) {
         playerRef.current.dispose();
         playerRef.current = null;
@@ -236,12 +268,27 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       {/* Error Overlay */}
       {error && (
         <div className="absolute inset-0 flex items-center justify-center bg-[hsl(var(--player-bg))]/90 backdrop-blur-sm z-10">
-          <div className="flex flex-col items-center gap-4 p-6 text-center">
+          <div className="flex flex-col items-center gap-4 p-6 text-center max-w-md">
             <AlertCircle className="w-12 h-12 text-destructive" />
             <div className="space-y-2">
               <p className="text-sm font-semibold">Impossible de charger le flux</p>
               <p className="text-xs text-muted-foreground">{error}</p>
             </div>
+            <Button
+              onClick={() => {
+                setError(null);
+                setIsLoading(true);
+                const player = playerRef.current;
+                if (player) {
+                  player.src({ src: getProxiedUrl(streamUrl), type: 'application/x-mpegURL' });
+                  player.play().catch(() => {});
+                }
+              }}
+              variant="outline"
+              className="mt-2"
+            >
+              Réessayer
+            </Button>
           </div>
         </div>
       )}
