@@ -79,7 +79,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     videoMetrics.bufferLevel,
     healthStatus.score,
     { 
-      enabled: quality === 'auto',
+      enabled: quality === 'auto' && !errorRecovery.errorState.isRecovering, // Désactiver ABR pendant recovery
       switchThreshold: 3,
       minSwitchInterval: 10000,
       bufferTargetUp: 8,
@@ -159,8 +159,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     cleanupPlayer(mpegts2Ref, hls2Ref);
   };
 
-  // ABR automatique - appliquer les changements de qualité
+  // ABR automatique - appliquer les changements de qualité (sauf pendant recovery)
   useEffect(() => {
+    if (errorRecovery.errorState.isRecovering) {
+      console.log('⏸️ ABR paused during recovery');
+      return;
+    }
+    
     if (abrState.currentQuality && quality === 'auto' && playerTypeRef.current === 'hls') {
       console.log(`🎬 ABR applying quality: ${abrState.currentQuality.label}`);
       // Trigger reload avec nouvelle qualité
@@ -171,7 +176,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         });
       }
     }
-  }, [abrState.currentQuality, quality, isTransitioning]);
+  }, [abrState.currentQuality, quality, isTransitioning, errorRecovery.errorState.isRecovering]);
 
   // Monitoring health et alertes
   useEffect(() => {
@@ -268,16 +273,24 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     });
 
     player.on(mpegts.Events.ERROR, (errorType: string, errorDetail: any) => {
+      console.error('🔴 MPEGTS Error:', errorType, errorDetail);
       errorRecovery.recordError(`MPEGTS: ${errorType}`);
       
       if (!useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
         useProxyRef.current = true;
+        console.log('🔄 Switching to proxy...');
         toast.info("🔄 Basculement vers proxy");
-        errorRecovery.attemptRecovery(() => initDoubleBuffer());
+        errorRecovery.attemptRecovery(() => initDoubleBuffer()).catch(err => {
+          console.error('Failed to recover with proxy:', err);
+        });
       } else if (useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
         playerTypeRef.current = 'hls';
+        console.log('🔄 Switching to HLS...');
         toast.info("🔄 Basculement vers HLS");
-        errorRecovery.attemptRecovery(() => initDoubleBuffer());
+        errorRecovery.attemptRecovery(() => initDoubleBuffer()).catch(err => {
+          console.error('Failed to recover with HLS:', err);
+          toast.error("❌ Échec du basculement");
+        });
       }
     });
 
@@ -330,19 +343,25 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
     hls.on(Hls.Events.ERROR, (event, data) => {
       if (data.fatal) {
+        console.error('🔴 HLS Fatal Error:', data.type, data.details);
         errorRecovery.recordError(`HLS: ${data.type} - ${data.details}`);
         
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          console.log('🔄 Attempting HLS network recovery...');
           errorRecovery.attemptRecovery(() => {
             hls.startLoad();
-          });
+          }).catch(err => console.error('HLS network recovery failed:', err));
         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          console.log('🔄 Attempting HLS media recovery...');
           errorRecovery.attemptRecovery(() => {
             hls.recoverMediaError();
-          });
+          }).catch(err => console.error('HLS media recovery failed:', err));
         } else {
+          console.log('🔄 Switching back to MPEGTS...');
           playerTypeRef.current = 'mpegts';
-          errorRecovery.attemptRecovery(() => initDoubleBuffer());
+          errorRecovery.attemptRecovery(() => initDoubleBuffer()).catch(err => {
+            console.error('Failed to switch to MPEGTS:', err);
+          });
         }
       }
     });
@@ -423,8 +442,10 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const initDoubleBuffer = useCallback(() => {
     if (!video1Ref.current || !video2Ref.current) return;
     
+    console.log('🎬 Initializing double buffer...');
     cleanup();
     setIsLoading(true);
+    errorRecovery.reset(); // Reset error state on new init
     detectNetworkSpeed();
     
     const video1 = video1Ref.current;
@@ -434,9 +455,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     
     if (autoPlay) {
       const attemptPlay = () => {
+        console.log('▶️ Attempting playback...');
         video1.play().then(() => {
           setIsPlaying(true);
           setIsLoading(false);
+          console.log('✅ Playback started successfully');
           toast.success("✅ Lecture démarrée", {
             description: `${playerTypeRef.current.toUpperCase()} • ${networkSpeedRef.current}`,
             duration: 2000,
@@ -446,22 +469,39 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           setTimeout(() => {
             const video2 = video2Ref.current;
             if (video2) {
+              console.log('🔄 Preparing backup buffer...');
               video2.style.opacity = '0';
               video2.style.zIndex = '2';
               prepareVideo(video2, { mpegts: mpegts2Ref, hls: hls2Ref });
             }
           }, 3000);
-        }).catch(() => {
+        }).catch((err) => {
+          console.error('❌ Playback failed:', err);
+          
           if (errorRecovery.canRetry) {
-            errorRecovery.attemptRecovery(attemptPlay);
+            console.log('🔄 Retrying playback...');
+            errorRecovery.attemptRecovery(attemptPlay).catch((recErr) => {
+              console.error('❌ Recovery failed completely:', recErr);
+              setIsLoading(false);
+              errorRecovery.forceStop();
+              toast.error("❌ Échec de lecture", {
+                description: "Impossible de lire le flux après plusieurs tentatives",
+                duration: 5000,
+              });
+            });
           } else {
+            console.error('❌ Max retries reached');
             setIsLoading(false);
+            errorRecovery.forceStop();
             toast.error("❌ Échec de lecture après plusieurs tentatives");
           }
         });
       };
       
-      setTimeout(attemptPlay, 0);
+      // Delay initial pour laisser le player se préparer
+      setTimeout(attemptPlay, 100);
+    } else {
+      setIsLoading(false);
     }
   }, [autoPlay, detectNetworkSpeed, errorRecovery]);
 
@@ -845,9 +885,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
               <Loader2 className="w-16 h-16 text-primary animate-spin" />
               <div className="absolute inset-0 w-16 h-16 rounded-full bg-primary/20 animate-ping" />
             </div>
-            <div className="text-center space-y-2">
+            <div className="text-center space-y-2 max-w-sm px-4">
               <div className="text-base text-white font-bold">
-                {errorRecovery.errorState.isRecovering ? '🔄 Récupération en cours...' : 'Chargement du flux...'}
+                {errorRecovery.errorState.isRecovering 
+                  ? `🔄 Récupération (${errorRecovery.errorState.errorCount}/5)...` 
+                  : 'Chargement du flux...'}
               </div>
               <div className="text-xs text-white/70 font-mono space-y-1">
                 <div>{playerTypeRef.current.toUpperCase()} • {useProxyRef.current ? '🔒 Proxy' : '⚡ Direct'}</div>
@@ -857,7 +899,24 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
                     Tentative {errorRecovery.errorState.errorCount}/5
                   </div>
                 )}
+                {errorRecovery.errorState.lastError && (
+                  <div className="text-red-400 text-[10px]">
+                    {errorRecovery.errorState.lastError}
+                  </div>
+                )}
               </div>
+              {errorRecovery.errorState.isRecovering && errorRecovery.errorState.errorCount >= 3 && (
+                <button
+                  onClick={() => {
+                    errorRecovery.forceStop();
+                    setIsLoading(false);
+                    toast.info("Récupération annulée");
+                  }}
+                  className="mt-3 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-xs font-semibold transition-colors"
+                >
+                  ✕ Annuler la récupération
+                </button>
+              )}
             </div>
           </div>
         </div>
