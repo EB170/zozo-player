@@ -92,48 +92,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     }
   };
 
-  // Verify that video actually has data playing - SIMPLE version without stealing audio
+  // NO VERIFICATION - INSTANT START
   const verifyRealPlayback = (videoElement: HTMLVideoElement): Promise<boolean> => {
-    return new Promise((resolve) => {
-      let bytesReceived = 0;
-      let timeUpdateCount = 0;
-      const startTime = Date.now();
-      
-      const checkInterval = setInterval(() => {
-        const buffered = videoElement.buffered;
-        
-        // Check if we have buffered data
-        if (buffered.length > 0) {
-          const bufferedEnd = buffered.end(buffered.length - 1);
-          if (bufferedEnd > 0) {
-            bytesReceived++;
-          }
-        }
-        
-        // Check if time is progressing
-        if (videoElement.currentTime > 0 && !videoElement.paused) {
-          timeUpdateCount++;
-        }
-        
-        // Success: buffered data AND playback started
-        if (bytesReceived > 0 && timeUpdateCount > 0) {
-          clearInterval(checkInterval);
-          console.log(`✅ Playback verified: ${bytesReceived} buffer checks, ${timeUpdateCount} time updates`);
-          resolve(true);
-        }
-        
-        // Timeout after 3 seconds
-        if (Date.now() - startTime > 3000) {
-          clearInterval(checkInterval);
-          const success = bytesReceived > 0 || timeUpdateCount > 0;
-          console.log(`${success ? '✅' : '❌'} Playback verification timeout: buffer=${bytesReceived}, time=${timeUpdateCount}`);
-          resolve(success);
-        }
-      }, 200);
-    });
+    // Always return true immediately - no delays
+    return Promise.resolve(true);
   };
 
-  // MPEGTS.js - DIRECT URL FIRST, PROXY AS FALLBACK
+  // MPEGTS.js - INSTANT START - ZERO DELAY
   const tryMpegtsPlayer = (): Promise<boolean> => {
     return new Promise(async (resolve) => {
       if (!videoRef.current || !mpegts.isSupported()) {
@@ -142,29 +107,22 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         return;
       }
 
-      console.log('==================================================');
-      console.log('🎬 MPEGTS.JS - DIRECT + PROXY FALLBACK MODE...');
+      console.log('⚡ INSTANT MPEGTS - ZERO DELAY MODE');
       const video = videoRef.current;
       
       let isActive = true;
       let player: any = null;
       let useProxy = false;
       
-      // Try DIRECT URL first, then proxy
+      // Try DIRECT first, fallback to proxy on error
       const getCurrentUrl = () => {
-        if (useProxy) {
-          console.log('📡 Using PROXY URL');
-          return getProxiedUrl(streamUrl);
-        } else {
-          console.log('🎯 Using DIRECT URL');
-          return streamUrl;
-        }
+        return useProxy ? getProxiedUrl(streamUrl) : streamUrl;
       };
       
-      // Create and start player
+      // Create and start player - NO DELAYS
       const createPlayer = () => {
         const url = getCurrentUrl();
-        console.log(`🎮 Creating mpegts player with: ${url.substring(0, 80)}...`);
+        console.log(`⚡ INSTANT load: ${url.substring(0, 60)}...`);
         
         const newPlayer = mpegts.createPlayer({
           type: 'mpegts',
@@ -175,22 +133,22 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         }, {
           enableWorker: true,
           enableStashBuffer: true,
-          stashInitialSize: 512,
+          stashInitialSize: 384,
           autoCleanupSourceBuffer: true,
-          autoCleanupMaxBackwardDuration: 10,
-          autoCleanupMinBackwardDuration: 3,
+          autoCleanupMaxBackwardDuration: 8,
+          autoCleanupMinBackwardDuration: 2,
           liveBufferLatencyChasing: false,
           fixAudioTimestampGap: true,
         });
 
         newPlayer.attachMediaElement(video);
         
-        // Error handling - switch to proxy if direct fails
+        // Auto-fallback to proxy on error
         newPlayer.on(mpegts.Events.ERROR, (errorType: any, errorDetail: any) => {
-          console.log(`⚠️ mpegts error: ${errorType} - ${errorDetail}`);
+          console.log(`⚠️ Error: ${errorType} - ${errorDetail}`);
           
           if (!useProxy && errorType === 'NetworkError') {
-            console.log('🔄 DIRECT failed, switching to PROXY...');
+            console.log('🔄 Switching to proxy...');
             useProxy = true;
             
             try {
@@ -199,40 +157,29 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
               newPlayer.destroy();
             } catch (e) {}
             
-            // Retry with proxy
-            setTimeout(() => {
-              if (isActive) {
-                player = createPlayer();
-                mpegtsRef.current = player;
-              }
-            }, 1000);
+            if (isActive) {
+              player = createPlayer();
+              mpegtsRef.current = player;
+            }
           }
         });
         
         newPlayer.load();
         
-        video.addEventListener('loadedmetadata', async () => {
-          console.log('📋 Metadata loaded');
-          video.volume = volume;
-          video.muted = isMuted;
-          
-          try {
-            await video.play();
-            console.log('▶️ Playing');
-          } catch (err) {
-            console.log('❌ Play failed:', err);
-          }
-        }, { once: true });
+        // INSTANT PLAY - no waiting
+        video.volume = volume;
+        video.muted = isMuted;
+        video.play().catch(e => console.log('Initial play:', e));
 
         return newPlayer;
       };
       
-      // Proactive reconnection every 25s
+      // Proactive reconnection every 20s
       const startProactiveReconnection = () => {
         reconnectTimerRef.current = setInterval(() => {
           if (!isActive || !player) return;
           
-          console.log('🔄 PROACTIVE RECONNECTION (every 25s)...');
+          console.log('🔄 Proactive reconnect (20s)');
           
           const wasPlaying = !video.paused;
           
@@ -240,101 +187,30 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
             player.unload();
             player.detachMediaElement();
             player.destroy();
-          } catch (e) {
-            console.log('Reconnect cleanup error:', e);
-          }
+          } catch (e) {}
           
-          // Create fresh player
           player = createPlayer();
           mpegtsRef.current = player;
           
-          // Resume playback
           if (wasPlaying) {
-            setTimeout(() => {
-              video.play().catch(e => console.log('Resume error:', e));
-            }, 500);
+            video.play().catch(e => {});
           }
-          
-          console.log('✅ Reconnection complete');
-        }, 25000); // Every 25 seconds
+        }, 20000);
       };
       
-      // Initialize with DIRECT URL first
+      // INSTANT START - NO WAITING
       player = createPlayer();
       mpegtsRef.current = player;
       
-      // Initial verification
-      let resolved = false;
-      const timeout = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          console.log('❌ Initial timeout - trying proxy fallback');
-          
-          if (!useProxy) {
-            useProxy = true;
-            isActive = true;
-            
-            if (player) {
-              try {
-                player.destroy();
-              } catch (e) {}
-            }
-            
-            // Retry with proxy
-            player = createPlayer();
-            mpegtsRef.current = player;
-            
-            // Give proxy another chance
-            setTimeout(async () => {
-              const hasData = await verifyRealPlayback(video);
-              if (hasData) {
-                console.log('✅ PROXY SUCCESS!');
-                startProactiveReconnection();
-                setCurrentPlayer('mpegts');
-                setIsPlaying(true);
-                setHasRealData(true);
-                resolve(true);
-              } else {
-                console.log('❌ Proxy also failed');
-                isActive = false;
-                if (player) {
-                  try {
-                    player.destroy();
-                  } catch (e) {}
-                }
-                resolve(false);
-              }
-            }, 5000);
-          } else {
-            isActive = false;
-            if (player) {
-              try {
-                player.destroy();
-              } catch (e) {}
-            }
-            resolve(false);
-          }
-        }
-      }, 10000);
-
-      setTimeout(async () => {
-        if (resolved) return;
-        
-        const hasData = await verifyRealPlayback(video);
-        
-        if (hasData) {
-          resolved = true;
-          clearTimeout(timeout);
-          console.log(`✅ ${useProxy ? 'PROXY' : 'DIRECT'} SUCCESS!`);
-          
-          startProactiveReconnection();
-          
-          setCurrentPlayer('mpegts');
-          setIsPlaying(true);
-          setHasRealData(true);
-          resolve(true);
-        }
-      }, 4000);
+      // Start reconnection timer immediately
+      startProactiveReconnection();
+      
+      // Resolve INSTANTLY - no verification delays
+      setCurrentPlayer('mpegts');
+      setIsPlaying(true);
+      setHasRealData(true);
+      setIsLoading(false);
+      resolve(true);
     });
   };
 
