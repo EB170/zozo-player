@@ -47,7 +47,10 @@ const Index = () => {
     if (channel) {
       setSelectedChannel(channelName);
       setStreamUrl(channel.url);
-      toast.success(`Chargement de ${channel.name}`);
+      toast.success(`📺 Chargement de ${channel.name}`, {
+        description: "Le flux sera prêt dans quelques instants",
+        duration: 3000,
+      });
     }
   };
   return <div className="min-h-screen bg-background p-4 md:p-8">
@@ -87,16 +90,19 @@ const Index = () => {
         </Card>
 
         {/* Video Player */}
-        {streamUrl ? <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+        {streamUrl ? <div className="animate-in fade-in zoom-in slide-in-from-bottom-4 duration-700">
             <VideoPlayer streamUrl={streamUrl} autoPlay />
-          </div> : <Card className="p-12 bg-card border-border border-dashed">
-            <div className="text-center space-y-3">
-              <div className="inline-flex p-4 rounded-full bg-primary/10">
+          </div> : <Card className="p-12 bg-card border-border border-dashed hover:border-primary/50 transition-all duration-300">
+            <div className="text-center space-y-4">
+              <div className="inline-flex p-4 rounded-full bg-primary/10 animate-pulse">
                 <Video className="w-8 h-8 text-primary" />
               </div>
               <h3 className="text-xl font-semibold text-foreground">Aucun flux actif</h3>
-              <p className="text-muted-foreground">
-                Sélectionnez une chaîne de sport ci-dessus pour commencer la lecture
+              <p className="text-muted-foreground max-w-md mx-auto">
+                Sélectionnez une chaîne de sport ci-dessus pour commencer la lecture en direct
+              </p>
+              <p className="text-xs text-muted-foreground/60">
+                💡 Astuce : Utilisez les raccourcis clavier une fois la lecture démarrée
               </p>
             </div>
           </Card>}

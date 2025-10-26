@@ -51,6 +51,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const [quality, setQuality] = useState('auto');
   const [touchStartX, setTouchStartX] = useState(0);
   const [touchStartY, setTouchStartY] = useState(0);
+  const [isTransitioning, setIsTransitioning] = useState(false);
 
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
 
@@ -231,8 +232,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     const activeVideo = getActiveVideo();
     const backupVideo = getBackupVideo();
     
-    if (!activeVideo || !backupVideo) return;
+    if (!activeVideo || !backupVideo || isTransitioning) return;
     
+    setIsTransitioning(true);
     console.log('🔄 Seamless switch');
     
     if (activeVideoRef.current === 1) {
@@ -256,13 +258,17 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           setTimeout(() => {
             activeVideo.pause();
             activeVideoRef.current = activeVideoRef.current === 1 ? 2 : 1;
+            setIsTransitioning(false);
           }, 100);
         });
       }
     }, 50);
     
-    setTimeout(() => clearInterval(checkReady), 3000);
-  }, [playbackRate]);
+    setTimeout(() => {
+      clearInterval(checkReady);
+      setIsTransitioning(false);
+    }, 3000);
+  }, [playbackRate, isTransitioning]);
 
   const initDoubleBuffer = () => {
     if (!video1Ref.current || !video2Ref.current) return;
@@ -570,62 +576,75 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       />
 
       {/* Stats overlay */}
-      {showStats && (
-        <PlayerStats 
-          videoElement={getActiveVideo()}
-          playerType={playerTypeRef.current}
-          useProxy={useProxyRef.current}
-          bufferHealth={bufferHealth}
-        />
-      )}
+      <PlayerStats 
+        videoElement={getActiveVideo()}
+        playerType={playerTypeRef.current}
+        useProxy={useProxyRef.current}
+        bufferHealth={bufferHealth}
+        isVisible={showStats}
+      />
 
       {/* Settings overlay */}
-      {showSettings && (
-        <PlayerSettings
-          playbackRate={playbackRate}
-          onPlaybackRateChange={setPlaybackRate}
-          quality={quality}
-          onQualityChange={setQuality}
-        />
-      )}
+      <PlayerSettings
+        playbackRate={playbackRate}
+        onPlaybackRateChange={setPlaybackRate}
+        quality={quality}
+        onQualityChange={setQuality}
+        isVisible={showSettings}
+        onClose={() => setShowSettings(false)}
+      />
 
       {isLoading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
-          <div className="flex flex-col items-center gap-3">
-            <Loader2 className="w-12 h-12 text-primary animate-spin" />
-            <span className="text-xs text-muted-foreground">
-              {playerTypeRef.current.toUpperCase()} • {useProxyRef.current ? 'Proxy' : 'Direct'} • {networkSpeedRef.current}
-            </span>
+        <div className="absolute inset-0 flex items-center justify-center bg-black/90 backdrop-blur-sm z-10 animate-in fade-in duration-300">
+          <div className="flex flex-col items-center gap-4">
+            <div className="relative">
+              <Loader2 className="w-14 h-14 text-primary animate-spin" />
+              <div className="absolute inset-0 w-14 h-14 rounded-full bg-primary/20 animate-ping" />
+            </div>
+            <div className="text-center space-y-1">
+              <div className="text-sm text-white font-semibold">
+                Chargement du flux...
+              </div>
+              <div className="text-xs text-white/60 font-mono">
+                {playerTypeRef.current.toUpperCase()} • {useProxyRef.current ? '🔒 Proxy' : '⚡ Direct'} • {networkSpeedRef.current === 'fast' ? '📶 5G' : networkSpeedRef.current === 'medium' ? '📶 4G' : '📶 3G'}
+              </div>
+            </div>
           </div>
         </div>
       )}
 
       {showControls && (
-        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/80 to-transparent p-4 space-y-3 z-20">
-          {/* Buffer health bar */}
-          <div className="w-full h-1 bg-white/20 rounded-full overflow-hidden">
+        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/85 to-transparent p-4 md:p-6 space-y-3 z-20 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          {/* Buffer health bar avec gradient */}
+          <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden shadow-lg">
             <div 
-              className="h-full bg-primary transition-all duration-300"
+              className={`h-full transition-all duration-500 ease-out ${
+                bufferHealth > 70 ? 'bg-gradient-to-r from-green-500 to-green-400' :
+                bufferHealth > 40 ? 'bg-gradient-to-r from-yellow-500 to-yellow-400' :
+                'bg-gradient-to-r from-red-500 to-red-400'
+              }`}
               style={{ width: `${bufferHealth}%` }}
             />
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 md:gap-3">
+            {/* Play/Pause - Plus gros sur mobile */}
             <Button
               size="icon"
               variant="ghost"
               onClick={handlePlayPause}
-              className="text-white hover:text-primary"
+              className="text-white hover:text-primary hover:bg-white/10 transition-all h-10 w-10 md:h-9 md:w-9"
             >
-              {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+              {isPlaying ? <Pause className="w-5 h-5 md:w-5 md:h-5" /> : <Play className="w-5 h-5 md:w-5 md:h-5" />}
             </Button>
 
+            {/* Volume controls */}
             <div className="flex items-center gap-2 flex-1 max-w-xs">
               <Button
                 size="icon"
                 variant="ghost"
                 onClick={handleMuteToggle}
-                className="text-white hover:text-primary"
+                className="text-white hover:text-primary hover:bg-white/10 transition-all h-10 w-10 md:h-9 md:w-9"
               >
                 {isMuted || volume === 0 ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
               </Button>
@@ -634,17 +653,18 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
                 onValueChange={handleVolumeChange}
                 max={1}
                 step={0.1}
-                className="flex-1"
+                className="flex-1 cursor-pointer"
               />
             </div>
 
-            <div className="flex items-center gap-1 ml-auto">
+            {/* Action buttons - Plus espacés */}
+            <div className="flex items-center gap-1 md:gap-2 ml-auto">
               <Button
                 size="icon"
                 variant="ghost"
                 onClick={() => setShowSettings(!showSettings)}
-                className="text-white hover:text-primary"
-                title="Paramètres (S)"
+                className={`text-white hover:text-primary hover:bg-white/10 transition-all h-10 w-10 md:h-9 md:w-9 ${showSettings ? 'bg-white/10 text-primary' : ''}`}
+                title="Paramètres"
               >
                 <SettingsIcon className="w-5 h-5" />
               </Button>
@@ -653,8 +673,8 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
                 size="icon"
                 variant="ghost"
                 onClick={() => setShowStats(!showStats)}
-                className="text-white hover:text-primary"
-                title="Stats temps réel"
+                className={`hidden md:flex text-white hover:text-primary hover:bg-white/10 transition-all h-9 w-9 ${showStats ? 'bg-white/10 text-primary' : ''}`}
+                title="Stats"
               >
                 <BarChart3 className="w-5 h-5" />
               </Button>
@@ -663,8 +683,8 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
                 size="icon"
                 variant="ghost"
                 onClick={handlePiP}
-                className="text-white hover:text-primary"
-                title="Picture-in-Picture (P)"
+                className="hidden md:flex text-white hover:text-primary hover:bg-white/10 transition-all h-9 w-9"
+                title="Picture-in-Picture"
               >
                 <PictureInPicture className="w-5 h-5" />
               </Button>
@@ -673,13 +693,20 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
                 size="icon"
                 variant="ghost"
                 onClick={handleFullscreen}
-                className="text-white hover:text-primary"
-                title="Plein écran (F)"
+                className="text-white hover:text-primary hover:bg-white/10 transition-all h-10 w-10 md:h-9 md:w-9"
+                title="Plein écran"
               >
                 <Maximize className="w-5 h-5" />
               </Button>
             </div>
           </div>
+          
+          {/* Indicateur vitesse de lecture si différent de 1x */}
+          {playbackRate !== 1 && (
+            <div className="absolute top-2 right-4 bg-primary/90 text-primary-foreground px-2 py-1 rounded-md text-xs font-bold animate-in fade-in slide-in-from-right-2">
+              {playbackRate}x
+            </div>
+          )}
         </div>
       )}
     </div>
