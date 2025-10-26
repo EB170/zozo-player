@@ -91,10 +91,20 @@ export const VideoPlayerHybrid = ({
 
   // Cleanup complet
   const cleanup = useCallback(() => {
+    const video = videoRef.current;
+    
+    // Pause et reset vidéo pour éviter overlaps
+    if (video) {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    }
+
     if (retryTimeoutRef.current) {
       clearTimeout(retryTimeoutRef.current);
       retryTimeoutRef.current = null;
     }
+    
     if (mpegtsRef.current) {
       try {
         mpegtsRef.current.pause();
@@ -106,8 +116,11 @@ export const VideoPlayerHybrid = ({
       }
       mpegtsRef.current = null;
     }
+    
     if (hlsRef.current) {
       try {
+        hlsRef.current.stopLoad();
+        hlsRef.current.detachMedia();
         hlsRef.current.destroy();
       } catch (e) {
         console.warn('HLS cleanup error:', e);
@@ -223,83 +236,65 @@ export const VideoPlayerHybrid = ({
     }
     console.log('🎬 Creating HLS player...');
 
-    // Configuration ultra-optimisée pour LIVE avec zéro délai
+    // Configuration optimisée pour stabilité maximale
     const hls = new Hls({
       debug: false,
       enableWorker: true,
+      
       // ========== LOW LATENCY MODE ==========
       lowLatencyMode: true,
-      // TOUJOURS activé pour live
 
-      // ========== BUFFER MINIMAL ==========
-      maxBufferLength: 4,
-      // 4s max buffer (vs 30s avant) pour réduire délai
-      maxMaxBufferLength: 10,
-      // Cap absolu à 10s
-      maxBufferSize: 20 * 1000 * 1000,
-      // 20MB max
-      maxBufferHole: 0.1,
-      // Tolérance trou de 100ms seulement
-
-      // ========== LIVE SYNC AGRESSIF ==========
-      liveSyncDurationCount: 2,
-      // Rester à 2 segments du live (vs 3)
-      liveMaxLatencyDurationCount: 4,
-      // Max 4 segments de retard (vs 6-10)
+      // ========== BUFFER OPTIMISÉ POUR STABILITÉ ==========
+      maxBufferLength: 8,           // 8s buffer (équilibre délai/stabilité)
+      maxMaxBufferLength: 15,       // Cap à 15s pour éviter OOM
+      maxBufferSize: 30 * 1000 * 1000, // 30MB max
+      maxBufferHole: 0.5,           // Tolérance 500ms pour éviter freezes
+      
+      // ========== LIVE SYNC INTELLIGENT ==========
+      liveSyncDurationCount: 3,     // 3 segments pour plus de marge
+      liveMaxLatencyDurationCount: 6, // 6 segments max de retard
       liveDurationInfinity: false,
-      // ========== BACK BUFFER MINIMAL ==========
-      backBufferLength: 5,
-      // Garder seulement 5s en arrière (vs 20s)
-
-      // ========== CHARGEMENT RAPIDE ==========
-      manifestLoadingTimeOut: 5000,
-      // 5s timeout (vs 10s)
-      fragLoadingTimeOut: 8000,
-      // 8s timeout (vs 20s)
-      levelLoadingTimeOut: 5000,
-      manifestLoadingMaxRetry: 2,
-      // Moins de retry, plus rapide
-      levelLoadingMaxRetry: 2,
-      fragLoadingMaxRetry: 3,
-      // ========== ABR ULTRA-RÉACTIF ==========
-      abrEwmaFastLive: 2,
-      // Réaction rapide (vs 3)
-      abrEwmaSlowLive: 5,
-      // Adaptation rapide (vs 9)
-      abrBandWidthFactor: 0.9,
-      // 90% de la BP estimée
-      abrBandWidthUpFactor: 0.8,
-      // Monter facilement en qualité
+      
+      // ========== BACK BUFFER ==========
+      backBufferLength: 10,         // 10s en arrière pour replay
+      
+      // ========== CHARGEMENT ROBUSTE ==========
+      manifestLoadingTimeOut: 8000,
+      fragLoadingTimeOut: 12000,    // Plus de temps pour fragments
+      levelLoadingTimeOut: 8000,
+      manifestLoadingMaxRetry: 4,   // Plus de retries
+      levelLoadingMaxRetry: 4,
+      fragLoadingMaxRetry: 6,
+      manifestLoadingRetryDelay: 500,
+      levelLoadingRetryDelay: 500,
+      fragLoadingRetryDelay: 500,
+      
+      // ========== ABR STABLE ==========
+      abrEwmaFastLive: 3,           // Réaction modérée
+      abrEwmaSlowLive: 7,           // Stabilité avant changement
+      abrBandWidthFactor: 0.95,     // 95% de la BP (marge de sécurité)
+      abrBandWidthUpFactor: 0.7,    // Montée prudente en qualité
       abrMaxWithRealBitrate: true,
-      // Utiliser bitrate réel
       minAutoBitrate: 0,
-      // ========== STALL & RETRY AGRESSIFS ==========
-      maxStarvationDelay: 2,
-      // 2s max avant action
-      maxLoadingDelay: 2,
-      highBufferWatchdogPeriod: 1,
-      // Check toutes les 1s
-      nudgeOffset: 0.05,
-      // Nudge plus fin
-      nudgeMaxRetry: 15,
-      // Plus de tentatives
-
+      
+      // ========== GESTION STALL & BUFFER ==========
+      maxStarvationDelay: 4,        // 4s avant action anti-stall
+      maxLoadingDelay: 4,
+      highBufferWatchdogPeriod: 2,  // Check toutes les 2s
+      nudgeOffset: 0.1,             // Nudge doux
+      nudgeMaxRetry: 10,
+      
       // ========== PRÉCHARGEMENT ==========
-      startLevel: -1,
-      // Auto-start
+      startLevel: -1,               // Auto-start
       autoStartLoad: true,
-      startPosition: -1,
-      // Démarrer au live
-
+      startPosition: -1,            // Live edge
+      
       // ========== PERFORMANCE ==========
-      maxFragLookUpTolerance: 0.1,
-      // Tolérance recherche fragment
+      maxFragLookUpTolerance: 0.25, // Tolérance recherche
       progressive: true,
-      // Lecture progressive
-
+      
       // ========== LATENCE CHASING ==========
-      // Permet de rattraper le live si on prend du retard
-      maxLiveSyncPlaybackRate: 1.05 // Jouer à 105% max pour rattraper
+      maxLiveSyncPlaybackRate: 1.03 // Rattrapage doux à 103%
     });
     hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
       console.log('✅ HLS Manifest parsed:', data.levels.length, 'levels');
@@ -330,44 +325,88 @@ export const VideoPlayerHybrid = ({
     hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
       setCurrentLevel(data.level);
     });
+
+    // Gestion erreurs fatales ET non-fatales
     hls.on(Hls.Events.ERROR, (event, data) => {
+      console.warn('⚠️ HLS Error:', data.type, data.details, 'Fatal:', data.fatal);
+      
       if (data.fatal) {
         console.error('🔴 HLS Fatal Error:', data.type, data.details);
         switch (data.type) {
           case Hls.ErrorTypes.NETWORK_ERROR:
+            console.log('🔄 Recovering network error...');
             scheduleRetry(() => {
-              hls.startLoad();
+              if (hlsRef.current) {
+                hlsRef.current.startLoad();
+              }
             });
             break;
+            
           case Hls.ErrorTypes.MEDIA_ERROR:
-            hls.recoverMediaError();
+            console.log('🔄 Recovering media error...');
+            try {
+              hls.recoverMediaError();
+            } catch (e) {
+              console.error('Failed to recover media error:', e);
+              cleanup();
+              scheduleRetry(() => createHlsPlayer());
+            }
             break;
+            
           default:
             cleanup();
             scheduleRetry(() => createHlsPlayer());
             break;
         }
+      } else {
+        // Erreurs non-fatales : récupération automatique
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          if (data.details === 'bufferStalledError' || data.details === 'bufferAppendingError') {
+            console.log('🔧 Auto-recovering buffer error...');
+            setTimeout(() => {
+              if (videoRef.current && hlsRef.current) {
+                videoRef.current.play().catch(() => {});
+              }
+            }, 1000);
+          }
+        }
       }
+    });
+
+    // Surveillance du buffering continu
+    hls.on(Hls.Events.BUFFER_APPENDING, () => {
+      setIsLoading(false);
+    });
+
+    hls.on(Hls.Events.BUFFER_APPENDED, () => {
+      setIsLoading(false);
     });
     hls.loadSource(getProxiedUrl(streamUrl));
     hls.attachMedia(video);
     hlsRef.current = hls;
   }, [streamUrl, autoPlay, cleanup, scheduleRetry, networkSpeed]);
 
-  // Init player selon le type détecté
+  // Init player selon le type détecté avec transition propre
   const initPlayer = useCallback(() => {
-    cleanup();
     setIsLoading(true);
     setErrorMessage(null);
     retryCountRef.current = 0;
-    useProxyRef.current = false;
-    playerTypeRef.current = detectStreamType(streamUrl);
-    console.log(`🎯 Detected stream type: ${playerTypeRef.current}`);
-    if (playerTypeRef.current === 'hls') {
-      createHlsPlayer();
-    } else {
-      createMpegtsPlayer();
-    }
+    
+    // Cleanup complet de l'ancien flux
+    cleanup();
+    
+    // Délai pour assurer destruction complète avant nouveau flux
+    setTimeout(() => {
+      useProxyRef.current = false;
+      playerTypeRef.current = detectStreamType(streamUrl);
+      console.log(`🎯 Detected stream type: ${playerTypeRef.current}`);
+      
+      if (playerTypeRef.current === 'hls') {
+        createHlsPlayer();
+      } else {
+        createMpegtsPlayer();
+      }
+    }, 150); // 150ms pour éviter overlaps mémoire
   }, [streamUrl, cleanup, createHlsPlayer, createMpegtsPlayer]);
 
   // Buffer health monitoring
