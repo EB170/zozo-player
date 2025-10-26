@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 
 interface VideoMetrics {
   resolution: string;
@@ -21,11 +21,12 @@ export const useVideoMetrics = (videoElement: HTMLVideoElement | null) => {
     latency: 0,
   });
 
+  const lastFramesRef = useRef(0);
+  const lastTimeRef = useRef(Date.now());
+  const bytesHistoryRef = useRef<Array<{bytes: number, time: number}>>([]);
+
   useEffect(() => {
     if (!videoElement) return;
-
-    let lastBytesDownloaded = 0;
-    let lastTime = Date.now();
 
     const measureInterval = setInterval(() => {
       // Résolution
@@ -42,7 +43,8 @@ export const useVideoMetrics = (videoElement: HTMLVideoElement | null) => {
         bufferLevel = videoElement.buffered.end(0) - videoElement.currentTime;
       }
 
-      // Latency estimée (basée sur buffer)
+      // Latency = combien on est en retard sur le live edge
+      // Pour un live stream, on veut être proche de la fin du buffer
       const latency = Math.round(bufferLevel * 1000);
 
       // Video Quality API (Chrome/Edge)
@@ -51,38 +53,63 @@ export const useVideoMetrics = (videoElement: HTMLVideoElement | null) => {
       const droppedFrames = quality?.droppedVideoFrames || 0;
       const totalFrames = quality?.totalVideoFrames || 0;
       
-      // FPS estimation
-      const fps = totalFrames > 0 ? Math.round(totalFrames / videoElement.currentTime) : 0;
+      // FPS réel (delta frames / delta time)
+      const now = Date.now();
+      const timeDelta = (now - lastTimeRef.current) / 1000; // secondes
+      const framesDelta = totalFrames - lastFramesRef.current;
+      const fps = timeDelta > 0 ? Math.round(framesDelta / timeDelta) : 0;
+      
+      lastFramesRef.current = totalFrames;
+      lastTimeRef.current = now;
 
-      // Bitrate réel - utiliser Performance API si disponible
+      // Bitrate réel - mesurer les bytes téléchargés via Performance API
       let actualBitrate = 0;
       if (performance && (performance as any).getEntriesByType) {
-        const resources = (performance as any).getEntriesByType('resource');
-        const videoResources = resources.filter((r: any) => 
-          r.name.includes('.ts') || r.name.includes('.m3u8') || r.name.includes('stream')
-        );
-        
-        if (videoResources.length > 0) {
-          const now = Date.now();
-          const timeDiff = (now - lastTime) / 1000; // secondes
+        try {
+          const resources = (performance as any).getEntriesByType('resource');
+          const videoResources = resources.filter((r: any) => {
+            // Chercher des patterns plus larges
+            const name = r.name.toLowerCase();
+            return name.includes('stream') || 
+                   name.includes('video') || 
+                   name.includes('segment') ||
+                   name.includes('.ts') ||
+                   name.includes('.m4s') ||
+                   name.includes('.mp4');
+          });
           
-          const totalBytes = videoResources.reduce((sum: number, r: any) => 
-            sum + (r.transferSize || 0), 0
-          );
-          
-          if (totalBytes > lastBytesDownloaded && timeDiff > 0) {
-            const bytesDiff = totalBytes - lastBytesDownloaded;
-            actualBitrate = (bytesDiff * 8) / (timeDiff * 1000000); // Mbps
-            lastBytesDownloaded = totalBytes;
-            lastTime = now;
+          if (videoResources.length > 0) {
+            const totalBytes = videoResources.reduce((sum: number, r: any) => 
+              sum + (r.transferSize || r.encodedBodySize || 0), 0
+            );
+            
+            // Garder historique des 5 dernières secondes
+            bytesHistoryRef.current.push({ bytes: totalBytes, time: now });
+            bytesHistoryRef.current = bytesHistoryRef.current.filter(
+              entry => now - entry.time < 5000
+            );
+            
+            // Calculer bitrate sur les 5 dernières secondes
+            if (bytesHistoryRef.current.length >= 2) {
+              const oldest = bytesHistoryRef.current[0];
+              const newest = bytesHistoryRef.current[bytesHistoryRef.current.length - 1];
+              const bytesDiff = newest.bytes - oldest.bytes;
+              const timeDiff = (newest.time - oldest.time) / 1000; // secondes
+              
+              if (timeDiff > 0 && bytesDiff > 0) {
+                actualBitrate = (bytesDiff * 8) / (timeDiff * 1000000); // Mbps
+              }
+            }
           }
+        } catch (e) {
+          console.warn('Performance API error:', e);
         }
       }
 
       setMetrics({
         resolution: qualityLabel,
         actualBitrate: Math.max(0, actualBitrate),
-        fps: Math.min(fps, 60), // Cap à 60 fps
+        fps: Math.max(0, Math.min(fps, 60)), // Cap entre 0 et 60 fps
         droppedFrames,
         totalFrames,
         bufferLevel,

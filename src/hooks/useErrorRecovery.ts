@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface RetryConfig {
   maxRetries: number;
@@ -26,6 +26,15 @@ export const useErrorRecovery = (config: RetryConfig = {
   });
 
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Backoff exponentiel avec jitter
   const calculateBackoff = (attemptNumber: number): number => {
@@ -57,37 +66,39 @@ export const useErrorRecovery = (config: RetryConfig = {
 
   const attemptRecovery = (recoveryFn: () => void | Promise<void>): Promise<void> => {
     return new Promise((resolve, reject) => {
-      if (errorState.errorCount >= config.maxRetries) {
-        console.error('❌ Max retries exceeded');
-        reject(new Error('Max retries exceeded'));
-        return;
-      }
-
-      setErrorState(prev => ({ ...prev, isRecovering: true }));
-
-      if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
-      }
-
-      retryTimeoutRef.current = setTimeout(async () => {
-        console.log(`🔄 Attempting recovery (${errorState.errorCount + 1}/${config.maxRetries})...`);
-        
-        try {
-          await recoveryFn();
-          // Reset sur succès
-          setErrorState({
-            errorCount: 0,
-            lastError: null,
-            isRecovering: false,
-            nextRetryDelay: config.baseDelay,
-          });
-          console.log('✅ Recovery successful');
-          resolve();
-        } catch (err) {
-          console.error('❌ Recovery failed:', err);
-          reject(err);
+      setErrorState(prev => {
+        if (prev.errorCount >= config.maxRetries) {
+          console.error('❌ Max retries exceeded');
+          reject(new Error('Max retries exceeded'));
+          return prev;
         }
-      }, errorState.nextRetryDelay);
+
+        if (retryTimeoutRef.current) {
+          clearTimeout(retryTimeoutRef.current);
+        }
+
+        retryTimeoutRef.current = setTimeout(async () => {
+          console.log(`🔄 Attempting recovery (${prev.errorCount + 1}/${config.maxRetries})...`);
+          
+          try {
+            await recoveryFn();
+            // Reset sur succès
+            setErrorState({
+              errorCount: 0,
+              lastError: null,
+              isRecovering: false,
+              nextRetryDelay: config.baseDelay,
+            });
+            console.log('✅ Recovery successful');
+            resolve();
+          } catch (err) {
+            console.error('❌ Recovery failed:', err);
+            reject(err);
+          }
+        }, prev.nextRetryDelay);
+
+        return { ...prev, isRecovering: true };
+      });
     });
   };
 

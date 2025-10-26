@@ -24,19 +24,16 @@ const getProxiedUrl = (originalUrl: string): string => {
 };
 
 export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) => {
-  // Triple video system pour seamless transitions
+  // Double buffer system pour seamless transitions + cleanup proper
   const video1Ref = useRef<HTMLVideoElement>(null);
   const video2Ref = useRef<HTMLVideoElement>(null);
-  const video3Ref = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const activeVideoRef = useRef<1 | 2 | 3>(1);
+  const activeVideoRef = useRef<1 | 2>(1);
   
   const mpegts1Ref = useRef<any>(null);
   const mpegts2Ref = useRef<any>(null);
-  const mpegts3Ref = useRef<any>(null);
   const hls1Ref = useRef<Hls | null>(null);
   const hls2Ref = useRef<Hls | null>(null);
-  const hls3Ref = useRef<Hls | null>(null);
   
   const switchTimerRef = useRef<NodeJS.Timeout | null>(null);
   const healthCheckRef = useRef<NodeJS.Timeout | null>(null);
@@ -66,27 +63,45 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   // Hooks professionnels
   const bandwidthMetrics = useBandwidthMonitor();
   const errorRecovery = useErrorRecovery();
-  const activeVideo = activeVideoRef.current === 1 ? video1Ref.current : activeVideoRef.current === 2 ? video2Ref.current : video3Ref.current;
+  const activeVideo = activeVideoRef.current === 1 ? video1Ref.current : video2Ref.current;
   const videoMetrics = useVideoMetrics(activeVideo);
 
   const getActiveVideo = () => {
-    if (activeVideoRef.current === 1) return video1Ref.current;
-    if (activeVideoRef.current === 2) return video2Ref.current;
-    return video3Ref.current;
+    return activeVideoRef.current === 1 ? video1Ref.current : video2Ref.current;
   };
 
   const getNextVideo = () => {
-    const next = (activeVideoRef.current % 3) + 1;
-    if (next === 1) return video1Ref.current;
-    if (next === 2) return video2Ref.current;
-    return video3Ref.current;
+    return activeVideoRef.current === 1 ? video2Ref.current : video1Ref.current;
   };
 
   const getNextPlayerRefs = () => {
-    const next = (activeVideoRef.current % 3) + 1;
-    if (next === 1) return { mpegts: mpegts1Ref, hls: hls1Ref };
-    if (next === 2) return { mpegts: mpegts2Ref, hls: hls2Ref };
-    return { mpegts: mpegts3Ref, hls: hls3Ref };
+    return activeVideoRef.current === 1 
+      ? { mpegts: mpegts2Ref, hls: hls2Ref }
+      : { mpegts: mpegts1Ref, hls: hls1Ref };
+  };
+
+  const cleanupPlayer = (mpegtsRef: React.MutableRefObject<any>, hlsRef: React.MutableRefObject<Hls | null>) => {
+    if (mpegtsRef.current) {
+      try {
+        mpegtsRef.current.pause();
+        mpegtsRef.current.unload();
+        mpegtsRef.current.detachMediaElement();
+        mpegtsRef.current.destroy();
+      } catch (e) {
+        console.warn('Cleanup mpegts error:', e);
+      }
+      mpegtsRef.current = null;
+    }
+    
+    if (hlsRef.current) {
+      try {
+        hlsRef.current.stopLoad();
+        hlsRef.current.destroy();
+      } catch (e) {
+        console.warn('Cleanup hls error:', e);
+      }
+      hlsRef.current = null;
+    }
   };
 
   // Détection réseau adaptative
@@ -119,25 +134,8 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       healthCheckRef.current = null;
     }
     
-    [mpegts1Ref, mpegts2Ref, mpegts3Ref].forEach(ref => {
-      if (ref.current) {
-        try {
-          ref.current.unload();
-          ref.current.detachMediaElement();
-          ref.current.destroy();
-        } catch (e) {}
-        ref.current = null;
-      }
-    });
-    
-    [hls1Ref, hls2Ref, hls3Ref].forEach(ref => {
-      if (ref.current) {
-        try {
-          ref.current.destroy();
-        } catch (e) {}
-        ref.current = null;
-      }
-    });
+    cleanupPlayer(mpegts1Ref, hls1Ref);
+    cleanupPlayer(mpegts2Ref, hls2Ref);
   };
 
   // Adapter buffer selon bandwidth et qualité
@@ -194,11 +192,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       if (!useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
         useProxyRef.current = true;
         toast.info("🔄 Basculement vers proxy");
-        errorRecovery.attemptRecovery(() => initTripleBuffer());
+        errorRecovery.attemptRecovery(() => initDoubleBuffer());
       } else if (useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
         playerTypeRef.current = 'hls';
         toast.info("🔄 Basculement vers HLS");
-        errorRecovery.attemptRecovery(() => initTripleBuffer());
+        errorRecovery.attemptRecovery(() => initDoubleBuffer());
       }
     });
 
@@ -249,7 +247,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           });
         } else {
           playerTypeRef.current = 'mpegts';
-          errorRecovery.attemptRecovery(() => initTripleBuffer());
+          errorRecovery.attemptRecovery(() => initDoubleBuffer());
         }
       }
     });
@@ -283,14 +281,20 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     if (!activeVideo || !nextVideo || isTransitioning) return;
     
     setIsTransitioning(true);
-    console.log(`🔄 Triple buffer switch: ${activeVideoRef.current} → ${(activeVideoRef.current % 3) + 1}`);
+    console.log(`🔄 Buffer switch: ${activeVideoRef.current} → ${activeVideoRef.current === 1 ? 2 : 1}`);
     
+    // Cleanup l'ancien player du next buffer avant de créer un nouveau
     const nextRefs = getNextPlayerRefs();
+    cleanupPlayer(nextRefs.mpegts, nextRefs.hls);
+    
+    // Créer nouveau player
     prepareVideo(nextVideo, nextRefs);
     
+    let checkTimeout: NodeJS.Timeout;
     const checkReady = setInterval(() => {
       if (nextVideo.readyState >= 2) {
         clearInterval(checkReady);
+        clearTimeout(checkTimeout);
         
         nextVideo.currentTime = activeVideo.currentTime;
         nextVideo.playbackRate = playbackRate;
@@ -303,22 +307,26 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           
           setTimeout(() => {
             activeVideo.pause();
-            activeVideoRef.current = (activeVideoRef.current % 3) + 1 as 1 | 2 | 3;
+            activeVideoRef.current = activeVideoRef.current === 1 ? 2 : 1;
             setIsTransitioning(false);
-            errorRecovery.reset(); // Reset sur succès
-          }, 150);
+            errorRecovery.reset();
+          }, 300);
+        }).catch(err => {
+          console.error('Switch playback error:', err);
+          setIsTransitioning(false);
         });
       }
     }, 50);
     
-    setTimeout(() => {
+    checkTimeout = setTimeout(() => {
       clearInterval(checkReady);
       setIsTransitioning(false);
-    }, 4000);
+      console.warn('Switch timeout - buffer not ready');
+    }, 5000);
   }, [playbackRate, isTransitioning]);
 
-  const initTripleBuffer = () => {
-    if (!video1Ref.current || !video2Ref.current || !video3Ref.current) return;
+  const initDoubleBuffer = useCallback(() => {
+    if (!video1Ref.current || !video2Ref.current) return;
     
     cleanup();
     setIsLoading(true);
@@ -339,7 +347,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
             duration: 2000,
           });
           
-          // Préparer video 2 après 2s
+          // Préparer video 2 après 3s
           setTimeout(() => {
             const video2 = video2Ref.current;
             if (video2) {
@@ -347,17 +355,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
               video2.style.zIndex = '2';
               prepareVideo(video2, { mpegts: mpegts2Ref, hls: hls2Ref });
             }
-          }, 2000);
-          
-          // Préparer video 3 après 4s
-          setTimeout(() => {
-            const video3 = video3Ref.current;
-            if (video3) {
-              video3.style.opacity = '0';
-              video3.style.zIndex = '1';
-              prepareVideo(video3, { mpegts: mpegts3Ref, hls: hls3Ref });
-            }
-          }, 4000);
+          }, 3000);
         }).catch(() => {
           if (errorRecovery.canRetry) {
             errorRecovery.attemptRecovery(attemptPlay);
@@ -370,7 +368,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       
       setTimeout(attemptPlay, 0);
     }
-  };
+  }, [autoPlay, detectNetworkSpeed, errorRecovery]);
 
   const startHealthMonitoring = useCallback(() => {
     if (healthCheckRef.current) clearInterval(healthCheckRef.current);
@@ -489,13 +487,19 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           break;
         case 'ArrowUp':
           e.preventDefault();
-          setVolume(v => Math.min(1, v + 0.1));
-          toast.info(`🔊 Volume: ${Math.round((volume + 0.1) * 100)}%`, { duration: 1000 });
+          setVolume(v => {
+            const newVol = Math.min(1, v + 0.1);
+            toast.info(`🔊 Volume: ${Math.round(newVol * 100)}%`, { duration: 1000 });
+            return newVol;
+          });
           break;
         case 'ArrowDown':
           e.preventDefault();
-          setVolume(v => Math.max(0, v - 0.1));
-          toast.info(`🔉 Volume: ${Math.round((volume - 0.1) * 100)}%`, { duration: 1000 });
+          setVolume(v => {
+            const newVol = Math.max(0, v - 0.1);
+            toast.info(`🔉 Volume: ${Math.round(newVol * 100)}%`, { duration: 1000 });
+            return newVol;
+          });
           break;
         case 'ArrowLeft':
           e.preventDefault();
@@ -512,14 +516,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
-  }, [isPlaying, volume]);
+  }, []); // Fonctions stables qui utilisent des refs
 
   useEffect(() => {
     const video1 = video1Ref.current;
     const video2 = video2Ref.current;
-    const video3 = video3Ref.current;
     
-    if (!video1 || !video2 || !video3) return;
+    if (!video1 || !video2) return;
 
     const handleTimeUpdate = () => {
       lastTimeRef.current = Date.now();
@@ -534,14 +537,14 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       setIsLoading(true);
     };
 
-    [video1, video2, video3].forEach(video => {
+    [video1, video2].forEach(video => {
       video.addEventListener('timeupdate', handleTimeUpdate);
       video.addEventListener('playing', handlePlaying);
       video.addEventListener('waiting', handleWaiting);
     });
 
     return () => {
-      [video1, video2, video3].forEach(video => {
+      [video1, video2].forEach(video => {
         video.removeEventListener('timeupdate', handleTimeUpdate);
         video.removeEventListener('playing', handlePlaying);
         video.removeEventListener('waiting', handleWaiting);
@@ -556,15 +559,15 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     playerTypeRef.current = 'mpegts';
     activeVideoRef.current = 1;
     
-    initTripleBuffer();
+    initDoubleBuffer();
     startHealthMonitoring();
     startAutoSwitch();
     
     return () => cleanup();
-  }, [streamUrl, quality]);
+  }, [streamUrl, quality, initDoubleBuffer, startHealthMonitoring, startAutoSwitch]);
 
   useEffect(() => {
-    [video1Ref.current, video2Ref.current, video3Ref.current].forEach(video => {
+    [video1Ref.current, video2Ref.current].forEach(video => {
       if (video) {
         video.volume = volume;
       }
@@ -572,7 +575,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   }, [volume]);
 
   useEffect(() => {
-    [video1Ref.current, video2Ref.current, video3Ref.current].forEach(video => {
+    [video1Ref.current, video2Ref.current].forEach(video => {
       if (video) {
         video.playbackRate = playbackRate;
       }
@@ -598,7 +601,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     
     if (newVolume > 0 && isMuted) {
       setIsMuted(false);
-      [video1Ref.current, video2Ref.current, video3Ref.current].forEach(video => {
+      [video1Ref.current, video2Ref.current].forEach(video => {
         if (video) video.muted = false;
       });
     }
@@ -608,7 +611,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     const newMuted = !isMuted;
     setIsMuted(newMuted);
     
-    [video1Ref.current, video2Ref.current, video3Ref.current].forEach(video => {
+    [video1Ref.current, video2Ref.current].forEach(video => {
       if (video) video.muted = newMuted;
     });
   };
@@ -658,7 +661,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       onMouseLeave={() => isPlaying && !showSettings && setShowControls(false)}
       onClick={handleVideoClick}
     >
-      {/* Triple video system */}
+      {/* Double buffer system */}
       <video
         ref={video1Ref}
         className="absolute inset-0 w-full h-full transition-opacity duration-300"
@@ -669,14 +672,6 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       
       <video
         ref={video2Ref}
-        className="absolute inset-0 w-full h-full transition-opacity duration-300"
-        style={{ opacity: 0, zIndex: 1 }}
-        playsInline
-        preload="auto"
-      />
-      
-      <video
-        ref={video3Ref}
         className="absolute inset-0 w-full h-full transition-opacity duration-300"
         style={{ opacity: 0, zIndex: 1 }}
         playsInline
