@@ -61,6 +61,9 @@ export const VideoPlayerHybrid = ({
   const lastTapSideRef = useRef<'left' | 'right' | null>(null);
   const playerTypeRef = useRef<PlayerType>('mpegts');
   const useProxyRef = useRef(false);
+  const fragErrorCountRef = useRef(0);
+  const isTransitioningRef = useRef(false);
+  const hlsDebugMode = useRef(false); // Toggle pour debug HLS
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [volume, setVolume] = useState(1);
@@ -236,66 +239,75 @@ export const VideoPlayerHybrid = ({
     }
     console.log('🎬 Creating HLS player...');
 
-    // Configuration optimisée pour stabilité maximale
+    // Configuration optimisée pour stabilité maximale en production
     const hls = new Hls({
-      debug: false,
+      debug: hlsDebugMode.current,
       enableWorker: true,
       
-      // ========== LOW LATENCY MODE ==========
-      lowLatencyMode: true,
-
-      // ========== BUFFER OPTIMISÉ POUR STABILITÉ ==========
-      maxBufferLength: 8,           // 8s buffer (équilibre délai/stabilité)
-      maxMaxBufferLength: 15,       // Cap à 15s pour éviter OOM
-      maxBufferSize: 30 * 1000 * 1000, // 30MB max
-      maxBufferHole: 0.5,           // Tolérance 500ms pour éviter freezes
+      // ========== BUFFER OPTIMISÉ STABILITÉ ==========
+      maxBufferLength: 60,              // 60s buffer pour stabilité maximale
+      maxMaxBufferLength: 90,           // Cap à 90s
+      maxBufferSize: 60 * 1000 * 1000,  // 60MB
+      maxBufferHole: 0.7,               // Tolérance 700ms pour éviter skip
       
-      // ========== LIVE SYNC INTELLIGENT ==========
-      liveSyncDurationCount: 3,     // 3 segments pour plus de marge
-      liveMaxLatencyDurationCount: 6, // 6 segments max de retard
+      // ========== LIVE SYNC ==========
+      liveSyncDurationCount: 3,         // 3 fragments du live
+      liveMaxLatencyDurationCount: 6,   // Max 6 segments de retard
       liveDurationInfinity: false,
       
       // ========== BACK BUFFER ==========
-      backBufferLength: 10,         // 10s en arrière pour replay
+      backBufferLength: 10,             // 10s en arrière
       
       // ========== CHARGEMENT ROBUSTE ==========
-      manifestLoadingTimeOut: 8000,
-      fragLoadingTimeOut: 12000,    // Plus de temps pour fragments
-      levelLoadingTimeOut: 8000,
-      manifestLoadingMaxRetry: 4,   // Plus de retries
+      manifestLoadingTimeOut: 10000,
+      fragLoadingTimeOut: 20000,        // 20s timeout fragments
+      levelLoadingTimeOut: 10000,
+      manifestLoadingMaxRetry: 4,
       levelLoadingMaxRetry: 4,
-      fragLoadingMaxRetry: 6,
+      fragLoadingMaxRetry: 6,           // 6 tentatives par fragment
       manifestLoadingRetryDelay: 500,
       levelLoadingRetryDelay: 500,
-      fragLoadingRetryDelay: 500,
+      fragLoadingRetryDelay: 500,       // Délai initial retry
       
       // ========== ABR STABLE ==========
-      abrEwmaFastLive: 3,           // Réaction modérée
-      abrEwmaSlowLive: 7,           // Stabilité avant changement
-      abrBandWidthFactor: 0.95,     // 95% de la BP (marge de sécurité)
-      abrBandWidthUpFactor: 0.7,    // Montée prudente en qualité
+      abrEwmaFastLive: 3,
+      abrEwmaSlowLive: 7,
+      abrBandWidthFactor: 0.95,
+      abrBandWidthUpFactor: 0.7,
       abrMaxWithRealBitrate: true,
       minAutoBitrate: 0,
       
-      // ========== GESTION STALL & BUFFER ==========
-      maxStarvationDelay: 4,        // 4s avant action anti-stall
+      // ========== ANTI-STALL ==========
+      maxStarvationDelay: 4,
       maxLoadingDelay: 4,
-      highBufferWatchdogPeriod: 2,  // Check toutes les 2s
-      nudgeOffset: 0.1,             // Nudge doux
-      nudgeMaxRetry: 10,
+      highBufferWatchdogPeriod: 2,
+      nudgeOffset: 0.1,
+      nudgeMaxRetry: 3,
       
       // ========== PRÉCHARGEMENT ==========
-      startLevel: -1,               // Auto-start
+      startLevel: -1,
       autoStartLoad: true,
-      startPosition: -1,            // Live edge
+      startPosition: -1,
       
       // ========== PERFORMANCE ==========
-      maxFragLookUpTolerance: 0.25, // Tolérance recherche
+      maxFragLookUpTolerance: 0.2,
       progressive: true,
-      
-      // ========== LATENCE CHASING ==========
-      maxLiveSyncPlaybackRate: 1.03 // Rattrapage doux à 103%
+      lowLatencyMode: true,
+      maxLiveSyncPlaybackRate: 1.02     // Rattrapage 102%
     });
+    // Logs debug optionnels
+    if (hlsDebugMode.current) {
+      hls.on(Hls.Events.LEVEL_SWITCHED, (e, d) => 
+        console.debug('[HLS] LEVEL_SWITCHED', d.level)
+      );
+      hls.on(Hls.Events.BUFFER_APPENDED, (e, d) => 
+        console.debug('[HLS] BUFFER_APPENDED', d.timeRanges)
+      );
+      hls.on(Hls.Events.FRAG_LOADED, (e, d) => 
+        console.debug('[HLS] FRAG_LOADED', d.frag.sn)
+      );
+    }
+
     hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
       console.log('✅ HLS Manifest parsed:', data.levels.length, 'levels');
       const qualities: StreamQuality[] = data.levels.map((level: any, index: number) => ({
@@ -306,10 +318,12 @@ export const VideoPlayerHybrid = ({
         url: ''
       }));
       setAvailableQualities(qualities);
+      
       if (autoPlay) {
         video.play().then(() => {
           console.log('✅ HLS playback started');
           retryCountRef.current = 0;
+          fragErrorCountRef.current = 0;
           setErrorMessage(null);
           toast.success("✅ Lecture démarrée", {
             description: `HLS • ${networkSpeed}`,
@@ -322,47 +336,28 @@ export const VideoPlayerHybrid = ({
         });
       }
     });
+    
+    // Reset compteur erreurs sur succès fragment
+    hls.on(Hls.Events.FRAG_LOADED, () => {
+      fragErrorCountRef.current = 0;
+    });
     hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
       setCurrentLevel(data.level);
     });
 
-    // Gestion erreurs fatales ET non-fatales
+    // Gestion erreurs avec retry exponentiel et backoff
     hls.on(Hls.Events.ERROR, (event, data) => {
-      console.warn('⚠️ HLS Error:', data.type, data.details, 'Fatal:', data.fatal);
+      if (hlsDebugMode.current) {
+        console.debug('[HLS ERROR]', data.type, data.details, 'Fatal:', data.fatal);
+      }
       
-      if (data.fatal) {
-        console.error('🔴 HLS Fatal Error:', data.type, data.details);
-        switch (data.type) {
-          case Hls.ErrorTypes.NETWORK_ERROR:
-            console.log('🔄 Recovering network error...');
-            scheduleRetry(() => {
-              if (hlsRef.current) {
-                hlsRef.current.startLoad();
-              }
-            });
-            break;
-            
-          case Hls.ErrorTypes.MEDIA_ERROR:
-            console.log('🔄 Recovering media error...');
-            try {
-              hls.recoverMediaError();
-            } catch (e) {
-              console.error('Failed to recover media error:', e);
-              cleanup();
-              scheduleRetry(() => createHlsPlayer());
-            }
-            break;
-            
-          default:
-            cleanup();
-            scheduleRetry(() => createHlsPlayer());
-            break;
-        }
-      } else {
-        // Erreurs non-fatales : récupération automatique
+      if (!data.fatal) {
+        // Erreurs non-fatales : récupération douce
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          if (data.details === 'bufferStalledError' || data.details === 'bufferAppendingError') {
-            console.log('🔧 Auto-recovering buffer error...');
+          if (data.details === 'bufferStalledError' || 
+              data.details === 'bufferAppendingError' ||
+              data.details === 'bufferSeekOverHole') {
+            console.log('🔧 Auto-recovering buffer issue...');
             setTimeout(() => {
               if (videoRef.current && hlsRef.current) {
                 videoRef.current.play().catch(() => {});
@@ -370,10 +365,60 @@ export const VideoPlayerHybrid = ({
             }, 1000);
           }
         }
+        return;
+      }
+
+      // Erreurs FATALES
+      console.error('🔴 HLS Fatal Error:', data.type, data.details);
+
+      // Retry avec backoff exponentiel pour fragment errors
+      if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR || 
+          data.details === Hls.ErrorDetails.FRAG_LOAD_TIMEOUT) {
+        fragErrorCountRef.current++;
+        
+        if (fragErrorCountRef.current <= 6) {
+          const delay = 500 * Math.pow(1.5, fragErrorCountRef.current - 1);
+          console.log(`🔄 Retry fragment ${fragErrorCountRef.current}/6 in ${delay}ms`);
+          
+          setTimeout(() => {
+            if (hlsRef.current) {
+              hlsRef.current.startLoad();
+            }
+          }, delay);
+          return;
+        }
+      }
+
+      // Autres erreurs fatales
+      switch (data.type) {
+        case Hls.ErrorTypes.NETWORK_ERROR:
+          console.log('🔄 Network error, retrying with startLoad...');
+          scheduleRetry(() => {
+            if (hlsRef.current) {
+              hlsRef.current.startLoad();
+            }
+          });
+          break;
+          
+        case Hls.ErrorTypes.MEDIA_ERROR:
+          console.log('🔄 Media error, attempting recovery...');
+          try {
+            hls.recoverMediaError();
+          } catch (e) {
+            console.error('Recovery failed, recreating player');
+            cleanup();
+            scheduleRetry(() => createHlsPlayer());
+          }
+          break;
+          
+        default:
+          cleanup();
+          scheduleRetry(() => createHlsPlayer());
+          break;
       }
     });
 
-    // Surveillance du buffering continu
+    // Surveillance du buffering
     hls.on(Hls.Events.BUFFER_APPENDING, () => {
       setIsLoading(false);
     });
@@ -386,11 +431,182 @@ export const VideoPlayerHybrid = ({
     hlsRef.current = hls;
   }, [streamUrl, autoPlay, cleanup, scheduleRetry, networkSpeed]);
 
-  // Init player selon le type détecté avec transition propre
+  // Swap stream avec préchargement et transition fluide
+  const swapStream = useCallback(async (newUrl: string) => {
+    if (isTransitioningRef.current) {
+      console.log('⏳ Swap already in progress, skipping...');
+      return;
+    }
+    
+    isTransitioningRef.current = true;
+    setIsLoading(true);
+    
+    const video = videoRef.current;
+    if (!video) {
+      isTransitioningRef.current = false;
+      return;
+    }
+
+    const oldHls = hlsRef.current;
+    const newType = detectStreamType(newUrl);
+    
+    console.log(`🔄 Swapping stream to ${newType}: ${newUrl}`);
+
+    try {
+      // Pour HLS -> HLS, swap optimisé
+      if (newType === 'hls' && Hls.isSupported()) {
+        // Créer nouvelle instance
+        const newHls = new Hls({
+          debug: hlsDebugMode.current,
+          enableWorker: true,
+          maxBufferLength: 60,
+          maxBufferSize: 60 * 1000 * 1000,
+          maxBufferHole: 0.7,
+          liveSyncDurationCount: 3,
+          fragLoadingTimeOut: 20000,
+          fragLoadingMaxRetry: 6,
+          fragLoadingRetryDelay: 500,
+          autoStartLoad: true,
+          startPosition: -1,
+        });
+
+        // Précharger manifeste
+        try {
+          await fetch(getProxiedUrl(newUrl), { method: 'HEAD', mode: 'cors' });
+        } catch (e) {
+          console.warn('Manifest prefetch failed, continuing anyway');
+        }
+
+        // Attendre premier fragment chargé
+        const readyPromise = new Promise<void>((resolve, reject) => {
+          const onFragLoaded = () => {
+            cleanup();
+            resolve();
+          };
+          const onError = (ev: any, data: any) => {
+            if (data?.fatal) {
+              cleanup();
+              reject(data);
+            }
+          };
+          const cleanup = () => {
+            newHls.off(Hls.Events.FRAG_LOADED, onFragLoaded);
+            newHls.off(Hls.Events.ERROR, onError);
+          };
+          
+          newHls.on(Hls.Events.FRAG_LOADED, onFragLoaded);
+          newHls.on(Hls.Events.ERROR, onError);
+          
+          // Timeout de sécurité
+          setTimeout(() => {
+            cleanup();
+            resolve();
+          }, 5000);
+        });
+
+        // Charger source et attacher
+        newHls.loadSource(getProxiedUrl(newUrl));
+        newHls.attachMedia(video);
+        
+        await readyPromise;
+
+        // Détacher et détruire l'ancien proprement
+        if (oldHls) {
+          try {
+            oldHls.stopLoad();
+            oldHls.detachMedia();
+            oldHls.destroy();
+          } catch (e) {
+            console.warn('Old HLS cleanup warning:', e);
+          }
+        }
+
+        hlsRef.current = newHls;
+        playerTypeRef.current = 'hls';
+        
+        // Setup event handlers pour le nouveau player
+        setupHlsEventHandlers(newHls);
+
+        // Relancer lecture
+        video.play().catch(() => {});
+        
+      } else {
+        // Fallback: full cleanup + recreate
+        cleanup();
+        setTimeout(() => {
+          playerTypeRef.current = newType;
+          if (newType === 'hls') {
+            createHlsPlayer();
+          } else {
+            createMpegtsPlayer();
+          }
+        }, 200);
+      }
+
+    } catch (error) {
+      console.error('Swap stream error:', error);
+      cleanup();
+      setTimeout(() => initPlayer(), 300);
+    } finally {
+      isTransitioningRef.current = false;
+      fragErrorCountRef.current = 0;
+      retryCountRef.current = 0;
+    }
+  }, [cleanup, createHlsPlayer, createMpegtsPlayer]);
+
+  // Setup event handlers pour instance HLS (factorisation)
+  const setupHlsEventHandlers = useCallback((hls: Hls) => {
+    hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+      const qualities: StreamQuality[] = data.levels.map((level: any, index: number) => ({
+        id: `level-${index}`,
+        label: `${level.height}p`,
+        bandwidth: level.bitrate,
+        resolution: `${level.width}x${level.height}`,
+        url: ''
+      }));
+      setAvailableQualities(qualities);
+    });
+
+    hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
+      setCurrentLevel(data.level);
+    });
+
+    hls.on(Hls.Events.FRAG_LOADED, () => {
+      fragErrorCountRef.current = 0;
+      setIsLoading(false);
+    });
+
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      // Gestion erreurs identique à createHlsPlayer
+      if (!data.fatal) return;
+      
+      if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR || 
+          data.details === Hls.ErrorDetails.FRAG_LOAD_TIMEOUT) {
+        fragErrorCountRef.current++;
+        if (fragErrorCountRef.current <= 6) {
+          const delay = 500 * Math.pow(1.5, fragErrorCountRef.current - 1);
+          setTimeout(() => hls.startLoad(), delay);
+          return;
+        }
+      }
+
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        try {
+          hls.recoverMediaError();
+        } catch (e) {
+          cleanup();
+          setTimeout(() => createHlsPlayer(), 500);
+        }
+      }
+    });
+  }, [cleanup, createHlsPlayer]);
+
+  // Init player selon le type détecté
   const initPlayer = useCallback(() => {
     setIsLoading(true);
     setErrorMessage(null);
     retryCountRef.current = 0;
+    fragErrorCountRef.current = 0;
     
     // Cleanup complet de l'ancien flux
     cleanup();
@@ -406,7 +622,7 @@ export const VideoPlayerHybrid = ({
       } else {
         createMpegtsPlayer();
       }
-    }, 150); // 150ms pour éviter overlaps mémoire
+    }, 150);
   }, [streamUrl, cleanup, createHlsPlayer, createMpegtsPlayer]);
 
   // Buffer health monitoring
@@ -456,11 +672,28 @@ export const VideoPlayerHybrid = ({
     };
   }, []);
 
-  // Init on mount
+  // Init on mount + swap optimisé sur changement URL
   useEffect(() => {
-    initPlayer();
+    const isFirstMount = !hlsRef.current && !mpegtsRef.current;
+    
+    if (isFirstMount) {
+      // Premier mount : init normale
+      initPlayer();
+    } else {
+      // Changement URL : utiliser swap optimisé pour HLS
+      const currentType = playerTypeRef.current;
+      const newType = detectStreamType(streamUrl);
+      
+      if (currentType === 'hls' && newType === 'hls') {
+        swapStream(streamUrl);
+      } else {
+        // Type différent : full recreate
+        initPlayer();
+      }
+    }
+    
     return cleanup;
-  }, [streamUrl, initPlayer, cleanup]);
+  }, [streamUrl, initPlayer, cleanup, swapStream]);
 
   // Volume & playback rate
   useEffect(() => {
