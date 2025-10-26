@@ -1,9 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import mpegts from "mpegts.js";
 import Hls from "hls.js";
-import { Play, Pause, Volume2, VolumeX, Maximize, Loader2 } from "lucide-react";
+import { Play, Pause, Volume2, VolumeX, Maximize, Loader2, PictureInPicture, BarChart3, Settings as SettingsIcon } from "lucide-react";
 import { Button } from "./ui/button";
 import { Slider } from "./ui/slider";
+import { PlayerStats } from "./PlayerStats";
+import { PlayerSettings } from "./PlayerSettings";
+import { toast } from "sonner";
 
 interface VideoPlayerProps {
   streamUrl: string;
@@ -17,9 +20,10 @@ const getProxiedUrl = (originalUrl: string): string => {
 };
 
 export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) => {
-  // Double video system pour transitions seamless
+  // Double video system
   const video1Ref = useRef<HTMLVideoElement>(null);
   const video2Ref = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const activeVideoRef = useRef<1 | 2>(1);
   
   const mpegts1Ref = useRef<any>(null);
@@ -33,13 +37,20 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const playerTypeRef = useRef<'mpegts' | 'hls'>('mpegts');
   const lastTimeRef = useRef(0);
   const stallCountRef = useRef(0);
-  const isInitializedRef = useRef(false);
+  const networkSpeedRef = useRef<'fast' | 'medium' | 'slow'>('fast');
   
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [showControls, setShowControls] = useState(true);
+  const [showStats, setShowStats] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [bufferHealth, setBufferHealth] = useState(100);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [quality, setQuality] = useState('auto');
+  const [touchStartX, setTouchStartX] = useState(0);
+  const [touchStartY, setTouchStartY] = useState(0);
 
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
 
@@ -50,6 +61,25 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const getBackupVideo = () => {
     return activeVideoRef.current === 1 ? video2Ref.current : video1Ref.current;
   };
+
+  // Détection réseau adaptative
+  const detectNetworkSpeed = useCallback(() => {
+    const connection = (navigator as any).connection || (navigator as any).mozConnection || (navigator as any).webkitConnection;
+    
+    if (connection) {
+      const effectiveType = connection.effectiveType;
+      
+      if (effectiveType === '4g' || effectiveType === '5g') {
+        networkSpeedRef.current = 'fast';
+      } else if (effectiveType === '3g') {
+        networkSpeedRef.current = 'medium';
+      } else {
+        networkSpeedRef.current = 'slow';
+      }
+      
+      console.log(`📶 Network: ${effectiveType} (${networkSpeedRef.current})`);
+    }
+  }, []);
 
   const cleanup = () => {
     if (switchTimerRef.current) {
@@ -83,6 +113,15 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     });
   };
 
+  const getBufferSize = () => {
+    const speed = networkSpeedRef.current;
+    const qualityMultiplier = quality === 'low' ? 0.7 : quality === 'medium' ? 1 : quality === 'high' ? 1.5 : 1;
+    
+    if (speed === 'fast') return Math.round(1536 * qualityMultiplier);
+    if (speed === 'medium') return Math.round(1024 * qualityMultiplier);
+    return Math.round(768 * qualityMultiplier);
+  };
+
   const createMpegtsPlayer = (videoElement: HTMLVideoElement) => {
     const url = useProxyRef.current ? getProxiedUrl(streamUrl) : streamUrl;
     
@@ -95,12 +134,12 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     }, {
       enableWorker: true,
       enableStashBuffer: true,
-      stashInitialSize: 1024, // Buffer plus grand pour 0 saccade
+      stashInitialSize: getBufferSize(),
       autoCleanupSourceBuffer: true,
-      autoCleanupMaxBackwardDuration: 15,
-      autoCleanupMinBackwardDuration: 5,
-      liveBufferLatencyChasing: true, // Chasing activé pour low latency
-      liveBufferLatencyMaxLatency: 3,
+      autoCleanupMaxBackwardDuration: 18,
+      autoCleanupMinBackwardDuration: 6,
+      liveBufferLatencyChasing: networkSpeedRef.current === 'fast',
+      liveBufferLatencyMaxLatency: 4,
       liveBufferLatencyMinRemain: 0.5,
       fixAudioTimestampGap: true,
       lazyLoad: false,
@@ -111,9 +150,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       
       if (!useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
         useProxyRef.current = true;
+        toast.info("Basculement vers proxy");
         setTimeout(() => initDoubleBuffer(), 50);
       } else if (useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
         playerTypeRef.current = 'hls';
+        toast.info("Basculement vers HLS");
         setTimeout(() => initDoubleBuffer(), 50);
       }
     });
@@ -129,24 +170,26 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     
     const url = getProxiedUrl(streamUrl);
     
+    const bufferLength = networkSpeedRef.current === 'fast' ? 50 : networkSpeedRef.current === 'medium' ? 35 : 25;
+    
     const hls = new Hls({
       debug: false,
       enableWorker: true,
-      lowLatencyMode: true,
-      backBufferLength: 15,
-      maxBufferLength: 40, // Buffer plus long
-      maxBufferSize: 80 * 1000 * 1000,
+      lowLatencyMode: networkSpeedRef.current === 'fast',
+      backBufferLength: 18,
+      maxBufferLength: bufferLength,
+      maxBufferSize: 100 * 1000 * 1000,
       maxBufferHole: 0.3,
       highBufferWatchdogPeriod: 1,
       nudgeOffset: 0.1,
       nudgeMaxRetry: 5,
       maxFragLookUpTolerance: 0.1,
-      liveSyncDurationCount: 2, // Sync rapide
-      liveMaxLatencyDurationCount: 4,
-      manifestLoadingTimeOut: 8000,
-      fragLoadingTimeOut: 15000,
-      manifestLoadingMaxRetry: 4,
-      fragLoadingMaxRetry: 8,
+      liveSyncDurationCount: 2,
+      liveMaxLatencyDurationCount: 5,
+      manifestLoadingTimeOut: 10000,
+      fragLoadingTimeOut: 20000,
+      manifestLoadingMaxRetry: 5,
+      fragLoadingMaxRetry: 10,
     });
 
     hls.on(Hls.Events.ERROR, (event, data) => {
@@ -173,6 +216,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     
     videoElement.volume = volume;
     videoElement.muted = isMuted;
+    videoElement.playbackRate = playbackRate;
     
     if (playerTypeRef.current === 'mpegts') {
       const player = createMpegtsPlayer(videoElement);
@@ -183,63 +227,62 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     }
   };
 
-  const switchToBackup = () => {
+  const switchToBackup = useCallback(() => {
     const activeVideo = getActiveVideo();
     const backupVideo = getBackupVideo();
     
     if (!activeVideo || !backupVideo) return;
     
-    // Préparer le backup
+    console.log('🔄 Seamless switch');
+    
     if (activeVideoRef.current === 1) {
       prepareVideo(backupVideo, mpegts2Ref, hls2Ref);
     } else {
       prepareVideo(backupVideo, mpegts1Ref, hls1Ref);
     }
     
-    // Attendre que le backup soit prêt
     const checkReady = setInterval(() => {
-      if (backupVideo.readyState >= 2) { // HAVE_CURRENT_DATA
+      if (backupVideo.readyState >= 2) {
         clearInterval(checkReady);
         
-        // Transition fluide
         backupVideo.currentTime = activeVideo.currentTime;
+        backupVideo.playbackRate = playbackRate;
         backupVideo.play().then(() => {
-          // Swap instantané
           activeVideo.style.opacity = '0';
           backupVideo.style.opacity = '1';
+          backupVideo.style.zIndex = '2';
+          activeVideo.style.zIndex = '1';
           
           setTimeout(() => {
             activeVideo.pause();
             activeVideoRef.current = activeVideoRef.current === 1 ? 2 : 1;
-          }, 50);
+          }, 100);
         });
       }
     }, 50);
     
-    // Timeout de sécurité
-    setTimeout(() => clearInterval(checkReady), 2000);
-  };
+    setTimeout(() => clearInterval(checkReady), 3000);
+  }, [playbackRate]);
 
   const initDoubleBuffer = () => {
     if (!video1Ref.current || !video2Ref.current) return;
     
     cleanup();
     setIsLoading(true);
+    detectNetworkSpeed();
     
-    // Init video 1 (active)
     const video1 = video1Ref.current;
     video1.style.opacity = '1';
     video1.style.zIndex = '2';
     prepareVideo(video1, mpegts1Ref, hls1Ref);
     
     if (autoPlay) {
-      // Démarrage INSTANTANÉ - 0 délai
       const attemptPlay = () => {
         video1.play().then(() => {
           setIsPlaying(true);
           setIsLoading(false);
+          toast.success("Lecture démarrée");
           
-          // Précharger video 2 en arrière-plan immédiatement
           setTimeout(() => {
             const video2 = video2Ref.current;
             if (video2) {
@@ -247,22 +290,17 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
               video2.style.zIndex = '1';
               prepareVideo(video2, mpegts2Ref, hls2Ref);
             }
-          }, 1000);
+          }, 1500);
         }).catch(() => {
-          // Retry immédiat
           setTimeout(attemptPlay, 100);
         });
       };
       
-      // Démarrage immédiat
       setTimeout(attemptPlay, 0);
     }
-    
-    isInitializedRef.current = true;
   };
 
-  // Monitoring ultra-rapide
-  const startHealthMonitoring = () => {
+  const startHealthMonitoring = useCallback(() => {
     if (healthCheckRef.current) clearInterval(healthCheckRef.current);
     
     lastTimeRef.current = Date.now();
@@ -275,13 +313,20 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       const now = Date.now();
       const elapsed = now - lastTimeRef.current;
       
-      // Détection stall ultra-rapide (2s)
-      if (elapsed > 2000) {
+      // Calculer buffer health
+      if (activeVideo.buffered.length > 0) {
+        const buffered = activeVideo.buffered.end(0) - activeVideo.currentTime;
+        const health = Math.min(100, Math.round((buffered / 5) * 100));
+        setBufferHealth(health);
+      }
+      
+      // Détection stall
+      if (elapsed > 2500) {
         stallCountRef.current++;
-        console.warn(`⚠️ Stall detected (${stallCountRef.current})`);
+        console.warn(`⚠️ Stall (${stallCountRef.current})`);
         
         if (stallCountRef.current >= 2) {
-          console.log('🔄 Switching buffer');
+          console.log('🔄 Auto-recovery');
           stallCountRef.current = 0;
           switchToBackup();
         }
@@ -289,16 +334,77 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         stallCountRef.current = 0;
       }
     }, 1000);
-  };
+  }, [switchToBackup]);
 
-  // Switch automatique seamless toutes les 15s
-  const startAutoSwitch = () => {
+  const startAutoSwitch = useCallback(() => {
     if (switchTimerRef.current) clearInterval(switchTimerRef.current);
     
+    const interval = networkSpeedRef.current === 'fast' ? 12000 : networkSpeedRef.current === 'medium' ? 18000 : 25000;
+    
     switchTimerRef.current = setInterval(() => {
-      console.log('🔄 Auto switch (15s)');
+      console.log(`🔄 Auto switch (${interval/1000}s)`);
       switchToBackup();
-    }, 15000);
+    }, interval);
+  }, [switchToBackup]);
+
+  // Raccourcis clavier
+  useEffect(() => {
+    const handleKeyPress = (e: KeyboardEvent) => {
+      const activeVideo = getActiveVideo();
+      if (!activeVideo) return;
+
+      switch(e.code) {
+        case 'Space':
+          e.preventDefault();
+          handlePlayPause();
+          break;
+        case 'KeyF':
+          handleFullscreen();
+          break;
+        case 'KeyM':
+          handleMuteToggle();
+          break;
+        case 'KeyP':
+          handlePiP();
+          break;
+        case 'ArrowUp':
+          e.preventDefault();
+          setVolume(v => Math.min(1, v + 0.1));
+          break;
+        case 'ArrowDown':
+          e.preventDefault();
+          setVolume(v => Math.max(0, v - 0.1));
+          break;
+        case 'KeyS':
+          setShowStats(s => !s);
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyPress);
+    return () => window.removeEventListener('keydown', handleKeyPress);
+  }, [isPlaying, volume]);
+
+  // Gesture controls mobile
+  const handleTouchStart = (e: React.TouchEvent) => {
+    setTouchStartX(e.touches[0].clientX);
+    setTouchStartY(e.touches[0].clientY);
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    const touchEndX = e.changedTouches[0].clientX;
+    const touchEndY = e.changedTouches[0].clientY;
+    
+    const deltaX = touchEndX - touchStartX;
+    const deltaY = touchEndY - touchStartY;
+    
+    // Swipe vertical = volume
+    if (Math.abs(deltaY) > Math.abs(deltaX) && Math.abs(deltaY) > 50) {
+      const volumeChange = -deltaY / 200;
+      setVolume(v => Math.max(0, Math.min(1, v + volumeChange)));
+    }
+    
+    // Swipe horizontal = seek (pas applicable pour live)
   };
 
   useEffect(() => {
@@ -343,14 +449,29 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     useProxyRef.current = false;
     playerTypeRef.current = 'mpegts';
     activeVideoRef.current = 1;
-    isInitializedRef.current = false;
     
     initDoubleBuffer();
     startHealthMonitoring();
     startAutoSwitch();
     
     return () => cleanup();
-  }, [streamUrl]);
+  }, [streamUrl, quality]);
+
+  useEffect(() => {
+    [video1Ref.current, video2Ref.current].forEach(video => {
+      if (video) {
+        video.volume = volume;
+      }
+    });
+  }, [volume]);
+
+  useEffect(() => {
+    [video1Ref.current, video2Ref.current].forEach(video => {
+      if (video) {
+        video.playbackRate = playbackRate;
+      }
+    });
+  }, [playbackRate]);
 
   const handlePlayPause = () => {
     const activeVideo = getActiveVideo();
@@ -369,17 +490,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     const newVolume = value[0];
     setVolume(newVolume);
     
-    [video1Ref.current, video2Ref.current].forEach(video => {
-      if (video) {
-        video.volume = newVolume;
-        if (newVolume > 0 && isMuted) {
-          video.muted = false;
-        }
-      }
-    });
-    
     if (newVolume > 0 && isMuted) {
       setIsMuted(false);
+      [video1Ref.current, video2Ref.current].forEach(video => {
+        if (video) video.muted = false;
+      });
     }
   };
 
@@ -388,17 +503,32 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     setIsMuted(newMuted);
     
     [video1Ref.current, video2Ref.current].forEach(video => {
-      if (video) {
-        video.muted = newMuted;
-      }
+      if (video) video.muted = newMuted;
     });
   };
 
   const handleFullscreen = () => {
+    if (!containerRef.current) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      containerRef.current.requestFullscreen();
+    }
+  };
+
+  const handlePiP = async () => {
     const activeVideo = getActiveVideo();
     if (!activeVideo) return;
-    if (activeVideo.requestFullscreen) {
-      activeVideo.requestFullscreen();
+    
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else {
+        await activeVideo.requestPictureInPicture();
+        toast.success("Mode Picture-in-Picture activé");
+      }
+    } catch (err) {
+      toast.error("Picture-in-Picture non supporté");
     }
   };
 
@@ -408,7 +538,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       clearTimeout(hideControlsTimeoutRef.current);
     }
     hideControlsTimeoutRef.current = setTimeout(() => {
-      if (isPlaying) {
+      if (isPlaying && !showSettings) {
         setShowControls(false);
       }
     }, 3000);
@@ -416,11 +546,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
   return (
     <div 
+      ref={containerRef}
       className="relative w-full aspect-video bg-black rounded-lg overflow-hidden shadow-2xl"
       onMouseMove={handleMouseMove}
-      onMouseLeave={() => isPlaying && setShowControls(false)}
+      onMouseLeave={() => isPlaying && !showSettings && setShowControls(false)}
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
     >
-      {/* Double video system - transitions invisibles */}
       <video
         ref={video1Ref}
         className="absolute inset-0 w-full h-full transition-opacity duration-300"
@@ -437,19 +569,47 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         preload="auto"
       />
 
+      {/* Stats overlay */}
+      {showStats && (
+        <PlayerStats 
+          videoElement={getActiveVideo()}
+          playerType={playerTypeRef.current}
+          useProxy={useProxyRef.current}
+          bufferHealth={bufferHealth}
+        />
+      )}
+
+      {/* Settings overlay */}
+      {showSettings && (
+        <PlayerSettings
+          playbackRate={playbackRate}
+          onPlaybackRateChange={setPlaybackRate}
+          quality={quality}
+          onQualityChange={setQuality}
+        />
+      )}
+
       {isLoading && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
           <div className="flex flex-col items-center gap-3">
             <Loader2 className="w-12 h-12 text-primary animate-spin" />
             <span className="text-xs text-muted-foreground">
-              {playerTypeRef.current.toUpperCase()} • {useProxyRef.current ? 'Proxy' : 'Direct'}
+              {playerTypeRef.current.toUpperCase()} • {useProxyRef.current ? 'Proxy' : 'Direct'} • {networkSpeedRef.current}
             </span>
           </div>
         </div>
       )}
 
       {showControls && (
-        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent p-4 space-y-3 z-20">
+        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/80 to-transparent p-4 space-y-3 z-20">
+          {/* Buffer health bar */}
+          <div className="w-full h-1 bg-white/20 rounded-full overflow-hidden">
+            <div 
+              className="h-full bg-primary transition-all duration-300"
+              style={{ width: `${bufferHealth}%` }}
+            />
+          </div>
+
           <div className="flex items-center gap-3">
             <Button
               size="icon"
@@ -478,14 +638,47 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
               />
             </div>
 
-            <Button
-              size="icon"
-              variant="ghost"
-              onClick={handleFullscreen}
-              className="text-white hover:text-primary ml-auto"
-            >
-              <Maximize className="w-5 h-5" />
-            </Button>
+            <div className="flex items-center gap-1 ml-auto">
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() => setShowSettings(!showSettings)}
+                className="text-white hover:text-primary"
+                title="Paramètres (S)"
+              >
+                <SettingsIcon className="w-5 h-5" />
+              </Button>
+
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() => setShowStats(!showStats)}
+                className="text-white hover:text-primary"
+                title="Stats temps réel"
+              >
+                <BarChart3 className="w-5 h-5" />
+              </Button>
+
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={handlePiP}
+                className="text-white hover:text-primary"
+                title="Picture-in-Picture (P)"
+              >
+                <PictureInPicture className="w-5 h-5" />
+              </Button>
+
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={handleFullscreen}
+                className="text-white hover:text-primary"
+                title="Plein écran (F)"
+              >
+                <Maximize className="w-5 h-5" />
+              </Button>
+            </div>
           </div>
         </div>
       )}
