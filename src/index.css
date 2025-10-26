@@ -97,4 +97,24 @@ All colors MUST be HSL.
   video {
     @apply w-full h-full object-contain;
   }
+  
+  /* Override Video.js default styles to match our theme */
+  .video-js {
+    @apply bg-[hsl(var(--player-bg))];
+  }
+  
+  .video-js .vjs-big-play-button {
+    @apply border-primary bg-primary/20 backdrop-blur-sm;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  
+  .video-js .vjs-big-play-button:hover {
+    @apply bg-primary/40;
+  }
+  
+  .video-js .vjs-loading-spinner {
+    @apply border-primary;
+  }
 }

@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import videojs from "video.js";
+import "video.js/dist/video-js.css";
 import { Play, Pause, Volume2, VolumeX, Maximize, Loader2 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Slider } from "./ui/slider";
@@ -11,9 +13,8 @@ interface VideoPlayerProps {
 
 export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const playerRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
-  const reconnectAttemptsRef = useRef(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [volume, setVolume] = useState(1);
@@ -21,187 +22,143 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const [showControls, setShowControls] = useState(true);
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
 
-  const attemptReconnect = () => {
-    reconnectAttemptsRef.current += 1;
-    const delay = Math.min(3000, 500 * reconnectAttemptsRef.current);
-    console.log(`Reconnect attempt ${reconnectAttemptsRef.current} in ${delay}ms`);
-    
-    reconnectTimeoutRef.current = setTimeout(() => {
-      if (videoRef.current && streamUrl) {
-        console.log("Forcing video reload...");
-        videoRef.current.load();
-        if (autoPlay) {
-          setTimeout(() => {
-            videoRef.current?.play().catch(e => {
-              console.log("Play failed, will retry:", e);
-              if (reconnectAttemptsRef.current < 50) {
-                attemptReconnect();
-              }
-            });
-          }, 300);
-        }
-      }
-    }, delay);
-  };
-
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !streamUrl) return;
+    if (!videoRef.current) return;
 
-    console.log("Initializing player with URL:", streamUrl);
-    setIsLoading(true);
-    reconnectAttemptsRef.current = 0;
+    // Initialize Video.js with aggressive live streaming options
+    const player = videojs(videoRef.current, {
+      controls: false, // We'll use custom controls
+      autoplay: autoPlay,
+      preload: "auto",
+      liveui: true,
+      fluid: true,
+      responsive: true,
+      aspectRatio: "16:9",
+      html5: {
+        vhs: {
+          // Video.js HTTP Streaming (VHS) options for HLS/DASH
+          enableLowInitialPlaylist: false,
+          smoothQualityChange: true,
+          overrideNative: true,
+          useBandwidthFromLocalStorage: false,
+          limitRenditionByPlayerDimensions: false,
+          useNetworkInformationApi: true,
+          useDtsForTimestampOffset: true,
+          experimentalBufferBasedABR: true,
+          experimentalLLHLS: false, // Disable for compatibility
+          // Aggressive retry and timeout settings
+          withCredentials: false,
+          handleManifestRedirects: true,
+          // Buffer settings
+          bandwidth: 4194304,
+          // Error retry
+          maxPlaylistRetries: Infinity,
+          timeout: 60000,
+        },
+        nativeAudioTracks: false,
+        nativeVideoTracks: false,
+        nativeTextTracks: false,
+      },
+      liveTracker: {
+        trackingThreshold: 30,
+        liveTolerance: 45,
+      },
+      sources: [{
+        src: streamUrl,
+        type: streamUrl.includes('.m3u8') ? 'application/x-mpegURL' : 
+              streamUrl.includes('.ts') ? 'video/mp2t' : 'application/x-mpegURL'
+      }]
+    });
 
-    // Clear any pending reconnects
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-    }
+    playerRef.current = player;
 
-    // Force video to load
-    video.src = streamUrl;
-    video.load();
-
-    const handleLoadStart = () => {
-      console.log("Load started");
+    // Event listeners
+    player.on('loadstart', () => {
+      console.log('Video.js: Load started');
       setIsLoading(true);
-    };
+    });
 
-    const handleLoadedMetadata = () => {
-      console.log("Metadata loaded");
+    player.on('loadedmetadata', () => {
+      console.log('Video.js: Metadata loaded');
       setIsLoading(false);
-      reconnectAttemptsRef.current = 0;
-    };
+    });
 
-    const handleLoadedData = () => {
-      console.log("Data loaded, attempting autoplay");
-      if (autoPlay && video.paused) {
-        video.play().catch((e) => {
-          console.log("Autoplay blocked:", e);
-          setIsPlaying(false);
-          setIsLoading(false);
-        });
-      }
-    };
-
-    const handleCanPlay = () => {
-      console.log("Can play");
+    player.on('canplay', () => {
+      console.log('Video.js: Can play');
       setIsLoading(false);
-      if (autoPlay && video.paused) {
-        video.play().catch(() => {});
-      }
-    };
+    });
 
-    const handlePlay = () => {
-      console.log("Playing");
+    player.on('playing', () => {
+      console.log('Video.js: Playing');
       setIsPlaying(true);
       setIsLoading(false);
-      reconnectAttemptsRef.current = 0;
-    };
+    });
 
-    const handlePause = () => {
-      console.log("Paused");
+    player.on('play', () => {
+      console.log('Video.js: Play event');
+      setIsPlaying(true);
+    });
+
+    player.on('pause', () => {
+      console.log('Video.js: Pause event');
       setIsPlaying(false);
-    };
+    });
 
-    const handleWaiting = () => {
-      console.log("Waiting for data...");
+    player.on('waiting', () => {
+      console.log('Video.js: Waiting for data');
       setIsLoading(true);
-      // Give it 8 seconds before attempting reconnect
-      setTimeout(() => {
-        if (video && video.readyState < 3) {
-          console.log("Still waiting after 8s, attempting reconnect");
-          attemptReconnect();
-        }
-      }, 8000);
-    };
+    });
 
-    const handlePlaying = () => {
-      console.log("Playing smoothly");
-      setIsLoading(false);
-      setIsPlaying(true);
-    };
-
-    const handleError = (e: Event) => {
-      const error = video.error;
-      console.log("Video error:", error?.code, error?.message);
-      setIsLoading(false);
+    player.on('error', (e: any) => {
+      const error = player.error();
+      console.log('Video.js Error:', error);
       
-      // Try to reconnect on any error
+      // Auto-recovery on error
       setTimeout(() => {
-        if (reconnectAttemptsRef.current < 50) {
-          attemptReconnect();
+        console.log('Video.js: Attempting error recovery');
+        player.src({
+          src: streamUrl,
+          type: streamUrl.includes('.m3u8') ? 'application/x-mpegURL' : 
+                streamUrl.includes('.ts') ? 'video/mp2t' : 'application/x-mpegURL'
+        });
+        player.load();
+        if (autoPlay) {
+          player.play().catch((err: any) => {
+            console.log('Video.js: Play failed after recovery', err);
+          });
         }
       }, 2000);
-    };
+    });
 
-    const handleStalled = () => {
-      console.log("Stream stalled, attempting recovery");
-      if (video && !video.paused) {
-        // Try to skip forward slightly
-        const currentTime = video.currentTime;
-        if (currentTime > 0) {
-          video.currentTime = currentTime + 0.1;
-        }
-        video.play().catch(() => {
-          console.log("Recovery failed, reconnecting");
-          setTimeout(() => attemptReconnect(), 1000);
-        });
+    // Stall recovery
+    player.on('stalled', () => {
+      console.log('Video.js: Stream stalled, attempting recovery');
+      const currentTime = player.currentTime();
+      if (currentTime && currentTime > 0) {
+        player.currentTime(currentTime + 0.1);
       }
-    };
+      player.play().catch(() => {});
+    });
 
-    const handleSuspend = () => {
-      console.log("Playback suspended, resuming");
-      if (video && video.paused && isPlaying) {
-        video.load();
-        video.play().catch(() => {});
-      }
-    };
+    // Progress tracking
+    player.on('progress', () => {
+      setIsLoading(false);
+    });
 
-    // Attach all event listeners
-    video.addEventListener("loadstart", handleLoadStart);
-    video.addEventListener("loadedmetadata", handleLoadedMetadata);
-    video.addEventListener("loadeddata", handleLoadedData);
-    video.addEventListener("canplay", handleCanPlay);
-    video.addEventListener("play", handlePlay);
-    video.addEventListener("pause", handlePause);
-    video.addEventListener("waiting", handleWaiting);
-    video.addEventListener("playing", handlePlaying);
-    video.addEventListener("error", handleError);
-    video.addEventListener("stalled", handleStalled);
-    video.addEventListener("suspend", handleSuspend);
-
-    // Try to play after a short delay
-    if (autoPlay) {
-      setTimeout(() => {
-        video.play().catch((e) => {
-          console.log("Initial play attempt failed:", e);
-          setIsPlaying(false);
-        });
-      }, 500);
-    }
-
+    // Cleanup
     return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
+      if (playerRef.current) {
+        playerRef.current.dispose();
+        playerRef.current = null;
       }
-      video.removeEventListener("loadstart", handleLoadStart);
-      video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-      video.removeEventListener("loadeddata", handleLoadedData);
-      video.removeEventListener("canplay", handleCanPlay);
-      video.removeEventListener("play", handlePlay);
-      video.removeEventListener("pause", handlePause);
-      video.removeEventListener("waiting", handleWaiting);
-      video.removeEventListener("playing", handlePlaying);
-      video.removeEventListener("error", handleError);
-      video.removeEventListener("stalled", handleStalled);
-      video.removeEventListener("suspend", handleSuspend);
     };
   }, [streamUrl, autoPlay]);
 
-
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.volume = isMuted ? 0 : volume;
+    const player = playerRef.current;
+    if (player) {
+      player.volume(isMuted ? 0 : volume);
+      player.muted(isMuted);
     }
   }, [volume, isMuted]);
 
@@ -216,13 +173,14 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   };
 
   const togglePlay = () => {
-    if (!videoRef.current) return;
+    const player = playerRef.current;
+    if (!player) return;
+    
     if (isPlaying) {
-      videoRef.current.pause();
+      player.pause();
     } else {
-      videoRef.current.play().catch((error) => {
-        console.log("Play failed:", error);
-        attemptReconnect();
+      player.play().catch((error: any) => {
+        console.log('Play failed:', error);
       });
     }
   };
@@ -232,11 +190,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   };
 
   const toggleFullscreen = () => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen();
+    const player = playerRef.current;
+    if (!player) return;
+    
+    if (player.isFullscreen()) {
+      player.exitFullscreen();
     } else {
-      document.exitFullscreen();
+      player.requestFullscreen();
     }
   };
 
@@ -247,17 +207,16 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       onMouseMove={handleMouseMove}
       onMouseLeave={() => isPlaying && setShowControls(false)}
     >
-      <video
-        ref={videoRef}
-        className="w-full h-full"
-        playsInline
-        preload="auto"
-        crossOrigin="anonymous"
-      />
+      <div data-vjs-player className="w-full h-full">
+        <video
+          ref={videoRef as any}
+          className="video-js vjs-default-skin vjs-big-play-centered w-full h-full"
+        />
+      </div>
 
       {/* Loading Overlay */}
       {isLoading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-[hsl(var(--player-bg))]/90 backdrop-blur-sm">
+        <div className="absolute inset-0 flex items-center justify-center bg-[hsl(var(--player-bg))]/90 backdrop-blur-sm z-10">
           <div className="flex flex-col items-center gap-4">
             <Loader2 className="w-12 h-12 text-primary animate-spin" />
             <p className="text-sm text-muted-foreground">Connexion au flux...</p>
@@ -265,10 +224,10 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         </div>
       )}
 
-      {/* Controls */}
+      {/* Custom Controls Overlay */}
       <div
         className={cn(
-          "absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/50 to-transparent p-4 transition-opacity duration-300",
+          "absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/50 to-transparent p-4 transition-opacity duration-300 z-20",
           showControls || !isPlaying ? "opacity-100" : "opacity-0 pointer-events-none"
         )}
       >
@@ -277,7 +236,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
             onClick={togglePlay}
             variant="ghost"
             size="icon"
-            className="hover:bg-[hsl(var(--player-hover))] text-foreground"
+            className="hover:bg-white/20 text-white"
           >
             {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
           </Button>
@@ -287,7 +246,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
               onClick={toggleMute}
               variant="ghost"
               size="icon"
-              className="hover:bg-[hsl(var(--player-hover))] text-foreground"
+              className="hover:bg-white/20 text-white"
             >
               {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
             </Button>
@@ -304,8 +263,8 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
           {isPlaying && !isLoading && (
             <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-[hsl(var(--success))] animate-pulse" />
-              <span className="text-xs text-[hsl(var(--success))]">EN DIRECT</span>
+              <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-xs text-red-500 font-semibold">● EN DIRECT</span>
             </div>
           )}
 
@@ -313,7 +272,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
             onClick={toggleFullscreen}
             variant="ghost"
             size="icon"
-            className="hover:bg-[hsl(var(--player-hover))] text-foreground"
+            className="hover:bg-white/20 text-white"
           >
             <Maximize className="w-5 h-5" />
           </Button>
