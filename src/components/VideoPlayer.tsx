@@ -523,7 +523,6 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     }
     cleanup();
     setIsLoading(true);
-    errorRecovery.reset(); // Reset error state on new init
     detectNetworkSpeed();
     
     const video1 = video1Ref.current;
@@ -597,7 +596,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     } else {
       setIsLoading(false);
     }
-  }, [autoPlay, detectNetworkSpeed, errorRecovery]);
+  }, [autoPlay, detectNetworkSpeed]);
 
   const startHealthMonitoring = useCallback(() => {
     if (healthCheckRef.current) clearInterval(healthCheckRef.current);
@@ -793,13 +792,14 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     useProxyRef.current = false;
     playerTypeRef.current = 'mpegts';
     activeVideoRef.current = 1;
+    errorRecovery.reset();
     
     initDoubleBuffer();
     startHealthMonitoring();
     startAutoSwitch();
     
     return () => cleanup();
-  }, [streamUrl, quality, initDoubleBuffer, startHealthMonitoring, startAutoSwitch]);
+  }, [streamUrl, quality]);
 
   useEffect(() => {
     [video1Ref.current, video2Ref.current].forEach(video => {
