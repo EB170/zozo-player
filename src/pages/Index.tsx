@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { VideoPlayerOptimized as VideoPlayer } from "@/components/VideoPlayerOptimized";
+import { VideoPlayerHybrid as VideoPlayer } from "@/components/VideoPlayerHybrid";
 import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
