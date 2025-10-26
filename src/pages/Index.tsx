@@ -61,7 +61,7 @@ const Index = () => {
         </div>
 
         {/* Channel Selection Card */}
-        <Card className="p-6 bg-card border-border shadow-[var(--shadow-elevated)]">
+        <Card className="p-6 bg-card/90 backdrop-blur border-border shadow-lg">
           <div className="space-y-4">
             {/* Sport Channels Selector */}
             <div className="space-y-2">
@@ -70,11 +70,11 @@ const Index = () => {
                 Chaînes de sport
               </label>
               <Select value={selectedChannel} onValueChange={handleChannelSelect}>
-                <SelectTrigger className="w-full bg-input border-border">
+                <SelectTrigger className="w-full bg-input border-border text-foreground font-medium">
                   <SelectValue placeholder="Sélectionner une chaîne..." />
                 </SelectTrigger>
                 <SelectContent className="bg-popover border-border max-h-[300px]">
-                  {PREDEFINED_CHANNELS.map(channel => <SelectItem key={channel.name} value={channel.name} className="cursor-pointer">
+                  {PREDEFINED_CHANNELS.map(channel => <SelectItem key={channel.name} value={channel.name} className="cursor-pointer hover:bg-accent">
                       {channel.name}
                     </SelectItem>)}
                 </SelectContent>
@@ -92,12 +92,12 @@ const Index = () => {
             <VideoPlayer streamUrl={streamUrl} autoPlay />
           </div> : <Card className="p-12 bg-card border-border border-dashed">
             <div className="text-center space-y-3">
-              <div className="inline-flex p-4 rounded-full bg-secondary">
-                <Video className="w-8 h-8 text-muted-foreground" />
+              <div className="inline-flex p-4 rounded-full bg-primary/10">
+                <Video className="w-8 h-8 text-primary" />
               </div>
-              <h3 className="text-xl font-semibold">Aucun flux actif</h3>
+              <h3 className="text-xl font-semibold text-foreground">Aucun flux actif</h3>
               <p className="text-muted-foreground">
-                Entrez l'URL d'un flux TS ou HLS ci-dessus pour commencer la lecture
+                Sélectionnez une chaîne de sport ci-dessus pour commencer la lecture
               </p>
             </div>
           </Card>}
