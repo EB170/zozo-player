@@ -1,0 +1,328 @@
+import { useEffect, useRef, useState } from "react";
+import Hls from "hls.js";
+import mpegts from "mpegts.js";
+import { Play, Pause, Volume2, VolumeX, Maximize, Loader2, AlertCircle } from "lucide-react";
+import { Button } from "./ui/button";
+import { Slider } from "./ui/slider";
+import { cn } from "@/lib/utils";
+
+interface VideoPlayerProps {
+  streamUrl: string;
+  autoPlay?: boolean;
+}
+
+type PlayerStatus = "idle" | "loading" | "playing" | "paused" | "error";
+
+export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const hlsRef = useRef<Hls | null>(null);
+  const mpegtsRef = useRef<mpegts.Player | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
+  const [status, setStatus] = useState<PlayerStatus>("idle");
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [isMuted, setIsMuted] = useState(false);
+  const [error, setError] = useState<string>("");
+  const [showControls, setShowControls] = useState(true);
+  const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
+
+  const cleanupPlayer = () => {
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+    if (mpegtsRef.current) {
+      mpegtsRef.current.destroy();
+      mpegtsRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+    }
+  };
+
+  const attemptReconnect = () => {
+    setStatus("loading");
+    setError("");
+    reconnectTimeoutRef.current = setTimeout(() => {
+      initializePlayer();
+    }, 2000);
+  };
+
+  const initializePlayer = () => {
+    if (!videoRef.current || !streamUrl) return;
+
+    cleanupPlayer();
+    setStatus("loading");
+    setError("");
+
+    const video = videoRef.current;
+    const isHLS = streamUrl.includes(".m3u8") || streamUrl.includes("m3u8");
+    const isTS = streamUrl.includes(".ts") || streamUrl.includes("transport-stream");
+
+    try {
+      if (isHLS && Hls.isSupported()) {
+        // HLS streaming
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true,
+          backBufferLength: 10,
+          maxBufferLength: 30,
+          maxMaxBufferLength: 60,
+          liveSyncDurationCount: 3,
+          liveMaxLatencyDurationCount: 10,
+          liveDurationInfinity: true,
+        });
+
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (autoPlay) {
+            const playPromise = video.play();
+            if (playPromise !== undefined) {
+              playPromise.catch(() => setStatus("paused"));
+            }
+          }
+        });
+
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (data.fatal) {
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                setError("Erreur réseau - reconnexion...");
+                attemptReconnect();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                hls.recoverMediaError();
+                break;
+              default:
+                setError("Erreur fatale de lecture");
+                setStatus("error");
+                break;
+            }
+          }
+        });
+
+        hls.loadSource(streamUrl);
+        hls.attachMedia(video);
+        hlsRef.current = hls;
+      } else if (isTS && mpegts.isSupported()) {
+        // MPEG-TS streaming
+        const player = mpegts.createPlayer({
+          type: "mpegts",
+          isLive: true,
+          url: streamUrl,
+        }, {
+          enableWorker: true,
+          enableStashBuffer: false,
+          stashInitialSize: 128,
+          liveBufferLatencyChasing: true,
+          liveBufferLatencyMaxLatency: 3,
+          liveBufferLatencyMinRemain: 0.5,
+        });
+
+        player.attachMediaElement(video);
+        player.load();
+
+        player.on(mpegts.Events.ERROR, (errorType: string, errorDetail: string) => {
+          setError(`Erreur TS: ${errorDetail} - reconnexion...`);
+          attemptReconnect();
+        });
+
+        if (autoPlay) {
+          try {
+            player.play();
+          } catch (e) {
+            setStatus("paused");
+          }
+        }
+
+        mpegtsRef.current = player;
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        // Native HLS support (Safari)
+        video.src = streamUrl;
+        if (autoPlay) {
+          const playPromise = video.play();
+          if (playPromise !== undefined) {
+            playPromise.catch(() => setStatus("paused"));
+          }
+        }
+      } else {
+        setError("Format de flux non supporté");
+        setStatus("error");
+      }
+    } catch (err) {
+      setError("Erreur d'initialisation du player");
+      setStatus("error");
+    }
+  };
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const handlePlay = () => {
+      setIsPlaying(true);
+      setStatus("playing");
+    };
+
+    const handlePause = () => {
+      setIsPlaying(false);
+      setStatus("paused");
+    };
+
+    const handleWaiting = () => {
+      setStatus("loading");
+    };
+
+    const handleError = () => {
+      setError("Erreur de lecture - reconnexion...");
+      attemptReconnect();
+    };
+
+    video.addEventListener("play", handlePlay);
+    video.addEventListener("pause", handlePause);
+    video.addEventListener("waiting", handleWaiting);
+    video.addEventListener("error", handleError);
+
+    return () => {
+      video.removeEventListener("play", handlePlay);
+      video.removeEventListener("pause", handlePause);
+      video.removeEventListener("waiting", handleWaiting);
+      video.removeEventListener("error", handleError);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (streamUrl) {
+      initializePlayer();
+    }
+    return () => cleanupPlayer();
+  }, [streamUrl]);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.volume = isMuted ? 0 : volume;
+    }
+  }, [volume, isMuted]);
+
+  const handleMouseMove = () => {
+    setShowControls(true);
+    if (hideControlsTimeoutRef.current) {
+      clearTimeout(hideControlsTimeoutRef.current);
+    }
+    hideControlsTimeoutRef.current = setTimeout(() => {
+      if (isPlaying) setShowControls(false);
+    }, 3000);
+  };
+
+  const togglePlay = () => {
+    if (!videoRef.current) return;
+    if (isPlaying) {
+      videoRef.current.pause();
+    } else {
+      videoRef.current.play();
+    }
+  };
+
+  const toggleMute = () => {
+    setIsMuted(!isMuted);
+  };
+
+  const toggleFullscreen = () => {
+    if (!containerRef.current) return;
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen();
+    } else {
+      document.exitFullscreen();
+    }
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative w-full aspect-video bg-[hsl(var(--player-bg))] rounded-lg overflow-hidden shadow-[var(--shadow-elevated)] group"
+      onMouseMove={handleMouseMove}
+      onMouseLeave={() => isPlaying && setShowControls(false)}
+    >
+      <video
+        ref={videoRef}
+        className="w-full h-full"
+        playsInline
+      />
+
+      {/* Status Overlay */}
+      {(status === "loading" || status === "error") && (
+        <div className="absolute inset-0 flex items-center justify-center bg-[hsl(var(--player-bg))]/90 backdrop-blur-sm">
+          {status === "loading" ? (
+            <div className="flex flex-col items-center gap-4">
+              <Loader2 className="w-12 h-12 text-primary animate-spin" />
+              <p className="text-sm text-muted-foreground">Chargement du flux...</p>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-4 px-6 text-center">
+              <AlertCircle className="w-12 h-12 text-destructive" />
+              <p className="text-sm text-destructive">{error}</p>
+              <Button onClick={initializePlayer} variant="outline" size="sm">
+                Réessayer
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Controls */}
+      <div
+        className={cn(
+          "absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/50 to-transparent p-4 transition-opacity duration-300",
+          showControls || !isPlaying ? "opacity-100" : "opacity-0 pointer-events-none"
+        )}
+      >
+        <div className="flex items-center gap-4">
+          <Button
+            onClick={togglePlay}
+            variant="ghost"
+            size="icon"
+            className="hover:bg-[hsl(var(--player-hover))] text-foreground"
+          >
+            {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+          </Button>
+
+          <div className="flex items-center gap-2 min-w-[120px]">
+            <Button
+              onClick={toggleMute}
+              variant="ghost"
+              size="icon"
+              className="hover:bg-[hsl(var(--player-hover))] text-foreground"
+            >
+              {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+            </Button>
+            <Slider
+              value={[isMuted ? 0 : volume * 100]}
+              onValueChange={(value) => setVolume(value[0] / 100)}
+              max={100}
+              step={1}
+              className="w-20"
+            />
+          </div>
+
+          <div className="flex-1" />
+
+          {status === "playing" && (
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-[hsl(var(--success))] animate-pulse" />
+              <span className="text-xs text-[hsl(var(--success))]">EN DIRECT</span>
+            </div>
+          )}
+
+          <Button
+            onClick={toggleFullscreen}
+            variant="ghost"
+            size="icon"
+            className="hover:bg-[hsl(var(--player-hover))] text-foreground"
+          >
+            <Maximize className="w-5 h-5" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+};
