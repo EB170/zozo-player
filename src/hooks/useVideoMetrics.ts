@@ -68,14 +68,17 @@ export const useVideoMetrics = (videoElement: HTMLVideoElement | null) => {
         try {
           const resources = (performance as any).getEntriesByType('resource');
           const videoResources = resources.filter((r: any) => {
-            // Chercher des patterns plus larges
+            // Détecter les ressources vidéo, incluant les proxies Supabase
             const name = r.name.toLowerCase();
-            return name.includes('stream') || 
+            return name.includes('stream-proxy') ||  // Proxy Supabase
+                   name.includes('stream') || 
                    name.includes('video') || 
                    name.includes('segment') ||
+                   name.includes('supabase.co/functions') || // Edge functions
                    name.includes('.ts') ||
                    name.includes('.m4s') ||
-                   name.includes('.mp4');
+                   name.includes('.mp4') ||
+                   (r.initiatorType === 'xmlhttprequest' && r.transferSize > 100000); // XHR volumineux
           });
           
           if (videoResources.length > 0) {
