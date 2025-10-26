@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import videojs from "video.js";
+import Clappr from "@clappr/player";
+import DPlayer from "dplayer";
+import * as PlyrImport from "plyr";
 import "video.js/dist/video-js.css";
+import "plyr/dist/plyr.css";
+
+// @ts-ignore
+const Plyr = PlyrImport.default || PlyrImport;
+
+declare const shaka: any;
 import { Play, Pause, Volume2, VolumeX, Maximize, Loader2, AlertCircle } from "lucide-react";
 import { Button } from "./ui/button";
 import { Slider } from "./ui/slider";
@@ -13,7 +22,7 @@ interface VideoPlayerProps {
   autoPlay?: boolean;
 }
 
-type PlayerType = 'hls' | 'videojs' | 'native' | null;
+type PlayerType = 'clappr' | 'dplayer' | 'hls' | 'shaka' | 'plyr' | 'videojs' | 'native' | null;
 
 const getProxiedUrl = (originalUrl: string): string => {
   const projectId = "wxkvljkvqcamktlwfmfx";
@@ -23,9 +32,15 @@ const getProxiedUrl = (originalUrl: string): string => {
 
 export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const playerContainerRef = useRef<HTMLDivElement>(null);
+  
   const hlsRef = useRef<Hls | null>(null);
   const videojsRef = useRef<any>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const clapprRef = useRef<any>(null);
+  const dplayerRef = useRef<any>(null);
+  const plyrRef = useRef<any>(null);
+  const shakaRef = useRef<any>(null);
   
   const [currentPlayer, setCurrentPlayer] = useState<PlayerType>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -37,25 +52,32 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const [playerAttempts, setPlayerAttempts] = useState<PlayerType[]>([]);
   
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
-  const loadingTimeoutRef = useRef<NodeJS.Timeout>();
-  const retryTimeoutRef = useRef<NodeJS.Timeout>();
   const { toast } = useToast();
 
-  // Cleanup function
   const cleanupPlayers = () => {
-    if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
-    if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
-    
     if (hlsRef.current) {
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
-    
     if (videojsRef.current) {
       videojsRef.current.dispose();
       videojsRef.current = null;
     }
-    
+    if (clapprRef.current) {
+      clapprRef.current.destroy();
+      clapprRef.current = null;
+    }
+    if (dplayerRef.current) {
+      dplayerRef.current.destroy();
+      dplayerRef.current = null;
+    }
+    if (plyrRef.current) {
+      plyrRef.current.destroy();
+      plyrRef.current = null;
+    }
+    if (shakaRef.current) {
+      shakaRef.current = null;
+    }
     if (videoRef.current) {
       videoRef.current.pause();
       videoRef.current.removeAttribute('src');
@@ -63,11 +85,260 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     }
   };
 
-  // Try HLS.js player
+  // Clappr Player - Excellent pour IPTV Live
+  const tryClapprPlayer = (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      if (!playerContainerRef.current) {
+        resolve(false);
+        return;
+      }
+
+      console.log('Trying Clappr player...');
+      const proxiedUrl = getProxiedUrl(streamUrl);
+      
+      try {
+        const player = new Clappr.Player({
+          parent: playerContainerRef.current,
+          source: proxiedUrl,
+          mute: false,
+          autoPlay: true,
+          width: '100%',
+          height: '100%',
+          playback: {
+            playInline: true,
+            recycleVideo: true,
+          },
+        });
+
+        clapprRef.current = player;
+        let resolved = false;
+
+        const timeout = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            console.log('Clappr timeout');
+            player.destroy();
+            clapprRef.current = null;
+            resolve(false);
+          }
+        }, 12000);
+
+        player.on(Clappr.Events.PLAYER_PLAY, () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('Clappr success!');
+            setCurrentPlayer('clappr');
+            setIsPlaying(true);
+            resolve(true);
+          }
+        });
+
+        player.on(Clappr.Events.PLAYER_ERROR, () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('Clappr error');
+            player.destroy();
+            clapprRef.current = null;
+            resolve(false);
+          }
+        });
+      } catch (error) {
+        console.log('Clappr initialization error:', error);
+        resolve(false);
+      }
+    });
+  };
+
+  // DPlayer - Spécialisé IPTV
+  const tryDPlayerPlayer = (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      if (!playerContainerRef.current) {
+        resolve(false);
+        return;
+      }
+
+      console.log('Trying DPlayer...');
+      const proxiedUrl = getProxiedUrl(streamUrl);
+      
+      try {
+        const player = new DPlayer({
+          container: playerContainerRef.current,
+          video: {
+            url: proxiedUrl,
+            type: 'auto',
+          },
+          autoplay: true,
+          live: true,
+        });
+
+        dplayerRef.current = player;
+        let resolved = false;
+
+        const timeout = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            console.log('DPlayer timeout');
+            player.destroy();
+            dplayerRef.current = null;
+            resolve(false);
+          }
+        }, 12000);
+
+        player.on('play', () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('DPlayer success!');
+            setCurrentPlayer('dplayer');
+            setIsPlaying(true);
+            resolve(true);
+          }
+        });
+
+        player.on('error', () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('DPlayer error');
+            player.destroy();
+            dplayerRef.current = null;
+            resolve(false);
+          }
+        });
+      } catch (error) {
+        console.log('DPlayer initialization error:', error);
+        resolve(false);
+      }
+    });
+  };
+
+  // Shaka Player - Google's robust player
+  const tryShakaPlayer = (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      if (!videoRef.current) {
+        resolve(false);
+        return;
+      }
+
+      console.log('Trying Shaka player...');
+      const video = videoRef.current;
+      const proxiedUrl = getProxiedUrl(streamUrl);
+
+      try {
+        shaka.polyfill.installAll();
+
+        const player = new shaka.Player();
+        player.attach(video);
+        shakaRef.current = player;
+
+        let resolved = false;
+        const timeout = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            console.log('Shaka timeout');
+            resolve(false);
+          }
+        }, 12000);
+
+        player.load(proxiedUrl)
+          .then(() => {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timeout);
+              console.log('Shaka success!');
+              setCurrentPlayer('shaka');
+              
+              video.play()
+                .then(() => setIsPlaying(true))
+                .catch(() => {});
+              
+              resolve(true);
+            }
+          })
+          .catch((error: any) => {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timeout);
+              console.log('Shaka error:', error);
+              resolve(false);
+            }
+          });
+      } catch (error) {
+        console.log('Shaka initialization error:', error);
+        resolve(false);
+      }
+    });
+  };
+
+  // Plyr with HLS
+  const tryPlyrPlayer = (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      if (!videoRef.current) {
+        resolve(false);
+        return;
+      }
+
+      console.log('Trying Plyr player...');
+      const video = videoRef.current;
+      const proxiedUrl = getProxiedUrl(streamUrl);
+
+      try {
+        const player = new Plyr(video, {
+          controls: [],
+          autoplay: true,
+          muted: false,
+        });
+
+        plyrRef.current = player;
+        video.src = proxiedUrl;
+
+        let resolved = false;
+        const timeout = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            console.log('Plyr timeout');
+            player.destroy();
+            plyrRef.current = null;
+            resolve(false);
+          }
+        }, 12000);
+
+        player.on('playing', () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('Plyr success!');
+            setCurrentPlayer('plyr');
+            setIsPlaying(true);
+            resolve(true);
+          }
+        });
+
+        player.on('error', () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            console.log('Plyr error');
+            player.destroy();
+            plyrRef.current = null;
+            resolve(false);
+          }
+        });
+
+        video.load();
+      } catch (error) {
+        console.log('Plyr initialization error:', error);
+        resolve(false);
+      }
+    });
+  };
+
+  // HLS.js
   const tryHlsPlayer = (): Promise<boolean> => {
     return new Promise((resolve) => {
       if (!videoRef.current || !Hls.isSupported()) {
-        console.log('HLS.js not supported');
         resolve(false);
         return;
       }
@@ -79,14 +350,9 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       const hls = new Hls({
         debug: false,
         enableWorker: true,
-        lowLatencyMode: false,
         maxBufferLength: 30,
-        maxMaxBufferLength: 60,
         manifestLoadingTimeOut: 15000,
-        manifestLoadingMaxRetry: 3,
-        levelLoadingTimeOut: 15000,
         fragLoadingTimeOut: 20000,
-        fragLoadingMaxRetry: 6,
       });
 
       let resolved = false;
@@ -97,7 +363,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           hls.destroy();
           resolve(false);
         }
-      }, 10000);
+      }, 12000);
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (!resolved) {
@@ -119,7 +385,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         if (data.fatal && !resolved) {
           resolved = true;
           clearTimeout(timeout);
-          console.log('HLS.js fatal error:', data.details);
+          console.log('HLS.js fatal error');
           hls.destroy();
           resolve(false);
         }
@@ -130,7 +396,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     });
   };
 
-  // Try Video.js player
+  // Video.js
   const tryVideojsPlayer = (): Promise<boolean> => {
     return new Promise((resolve) => {
       if (!videoRef.current) {
@@ -146,16 +412,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           controls: false,
           autoplay: false,
           preload: 'auto',
-          html5: {
-            vhs: {
-              overrideNative: true,
-              experimentalBufferBasedABR: true,
-            },
-          },
-          sources: [{
-            src: proxiedUrl,
-            type: 'video/mp2t'
-          }]
+          sources: [{ src: proxiedUrl, type: 'video/mp2t' }]
         });
 
         videojsRef.current = player;
@@ -169,7 +426,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
             videojsRef.current = null;
             resolve(false);
           }
-        }, 10000);
+        }, 12000);
 
         player.on('canplay', () => {
           if (!resolved) {
@@ -197,13 +454,13 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           }
         });
       } catch (error) {
-        console.log('Video.js initialization error:', error);
+        console.log('Video.js error:', error);
         resolve(false);
       }
     });
   };
 
-  // Try native player
+  // Native player
   const tryNativePlayer = (): Promise<boolean> => {
     return new Promise((resolve) => {
       if (!videoRef.current) {
@@ -222,7 +479,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           console.log('Native player timeout');
           resolve(false);
         }
-      }, 10000);
+      }, 12000);
 
       const onCanPlay = () => {
         if (!resolved) {
@@ -259,14 +516,17 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     });
   };
 
-  // Try all players sequentially
   const tryPlayers = async () => {
     cleanupPlayers();
     setIsLoading(true);
     setError(null);
     
     const strategies: Array<{ name: PlayerType, fn: () => Promise<boolean> }> = [
+      { name: 'clappr', fn: tryClapprPlayer },
+      { name: 'dplayer', fn: tryDPlayerPlayer },
       { name: 'hls', fn: tryHlsPlayer },
+      { name: 'shaka', fn: tryShakaPlayer },
+      { name: 'plyr', fn: tryPlyrPlayer },
       { name: 'videojs', fn: tryVideojsPlayer },
       { name: 'native', fn: tryNativePlayer },
     ];
@@ -284,19 +544,17 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         setIsLoading(false);
         toast({
           title: "Flux connecté",
-          description: `Lecture avec ${strategy.name} player`,
+          description: `Lecture avec ${strategy.name}`,
         });
         return;
       }
       
-      // Small delay between attempts
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 300));
     }
 
-    // All players failed
-    console.error('All players failed');
+    console.error('All 7 players failed');
     setIsLoading(false);
-    setError('Impossible de lire ce flux avec tous les lecteurs disponibles. Le flux peut être incompatible ou indisponible.');
+    setError('Aucun des 7 lecteurs disponibles ne peut lire ce flux. Le flux est peut-être hors ligne ou incompatible.');
     toast({
       title: "Erreur de lecture",
       description: "Tous les lecteurs ont échoué",
@@ -305,10 +563,21 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   };
 
   useEffect(() => {
-    tryPlayers();
+    // Load Shaka Player dynamically
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.10/shaka-player.compiled.min.js';
+    script.onload = () => {
+      tryPlayers();
+    };
+    script.onerror = () => {
+      console.error('Failed to load Shaka Player');
+      tryPlayers();
+    };
+    document.head.appendChild(script);
 
     return () => {
       cleanupPlayers();
+      document.head.removeChild(script);
     };
   }, [streamUrl]);
 
@@ -329,6 +598,16 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   }, []);
 
   useEffect(() => {
+    if (clapprRef.current) {
+      clapprRef.current.setVolume(isMuted ? 0 : volume * 100);
+    }
+    if (dplayerRef.current) {
+      dplayerRef.current.volume(isMuted ? 0 : volume, isMuted);
+    }
+    if (plyrRef.current) {
+      plyrRef.current.volume = isMuted ? 0 : volume;
+      plyrRef.current.muted = isMuted;
+    }
     const video = videoRef.current;
     if (video) {
       video.volume = isMuted ? 0 : volume;
@@ -351,40 +630,24 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   };
 
   const togglePlay = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    
-    if (videojsRef.current) {
-      if (isPlaying) {
-        videojsRef.current.pause();
-      } else {
-        videojsRef.current.play();
-      }
-    } else {
-      if (isPlaying) {
-        video.pause();
-      } else {
-        video.play().catch(() => {});
-      }
+    if (clapprRef.current) {
+      isPlaying ? clapprRef.current.pause() : clapprRef.current.play();
+    } else if (dplayerRef.current) {
+      isPlaying ? dplayerRef.current.pause() : dplayerRef.current.play();
+    } else if (plyrRef.current) {
+      isPlaying ? plyrRef.current.pause() : plyrRef.current.play();
+    } else if (videojsRef.current) {
+      isPlaying ? videojsRef.current.pause() : videojsRef.current.play();
+    } else if (videoRef.current) {
+      isPlaying ? videoRef.current.pause() : videoRef.current.play().catch(() => {});
     }
   };
 
-  const toggleMute = () => {
-    setIsMuted(!isMuted);
-  };
+  const toggleMute = () => setIsMuted(!isMuted);
 
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
-    
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
-    } else {
-      containerRef.current.requestFullscreen();
-    }
-  };
-
-  const handleRetry = () => {
-    tryPlayers();
+    document.fullscreenElement ? document.exitFullscreen() : containerRef.current.requestFullscreen();
   };
 
   return (
@@ -394,32 +657,23 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       onMouseMove={handleMouseMove}
       onMouseLeave={() => isPlaying && setShowControls(false)}
     >
-      <div data-vjs-player className="w-full h-full">
-        <video
-          ref={videoRef}
-          className="video-js vjs-default-skin w-full h-full"
-          playsInline
-        />
+      <div ref={playerContainerRef} className="absolute inset-0" />
+      <div data-vjs-player className="absolute inset-0">
+        <video ref={videoRef} className="video-js vjs-default-skin w-full h-full" playsInline />
       </div>
 
-      {/* Loading Overlay */}
       {isLoading && !error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/90 backdrop-blur-sm z-10">
           <div className="flex flex-col items-center gap-4">
             <Loader2 className="w-12 h-12 text-primary animate-spin" />
             <div className="text-center">
-              <p className="text-sm text-white mb-2">Connexion au flux...</p>
-              {playerAttempts.length > 0 && (
-                <p className="text-xs text-gray-400">
-                  Essai: {playerAttempts.join(' → ')}
-                </p>
-              )}
+              <p className="text-sm text-white mb-2">Test des lecteurs...</p>
+              <p className="text-xs text-gray-400">{playerAttempts.join(' → ')}</p>
             </div>
           </div>
         </div>
       )}
 
-      {/* Error Overlay */}
       {error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/90 backdrop-blur-sm z-10">
           <div className="flex flex-col items-center gap-4 p-6 text-center max-w-md">
@@ -427,22 +681,15 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
             <div className="space-y-2">
               <p className="text-sm font-semibold text-white">Impossible de charger le flux</p>
               <p className="text-xs text-gray-400">{error}</p>
-              <p className="text-xs text-gray-500 mt-2">
-                Lecteurs testés: {playerAttempts.join(', ')}
-              </p>
+              <p className="text-xs text-gray-500 mt-2">Testés: {playerAttempts.join(', ')}</p>
             </div>
-            <Button
-              onClick={handleRetry}
-              variant="outline"
-              className="mt-2"
-            >
+            <Button onClick={tryPlayers} variant="outline" className="mt-2">
               Réessayer tous les lecteurs
             </Button>
           </div>
         </div>
       )}
 
-      {/* Custom Controls Overlay */}
       <div
         className={cn(
           "absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/50 to-transparent p-4 transition-opacity duration-300 z-20",
@@ -450,22 +697,12 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         )}
       >
         <div className="flex items-center gap-4">
-          <Button
-            onClick={togglePlay}
-            variant="ghost"
-            size="icon"
-            className="hover:bg-white/20 text-white"
-          >
+          <Button onClick={togglePlay} variant="ghost" size="icon" className="hover:bg-white/20 text-white">
             {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
           </Button>
 
           <div className="flex items-center gap-2 min-w-[120px]">
-            <Button
-              onClick={toggleMute}
-              variant="ghost"
-              size="icon"
-              className="hover:bg-white/20 text-white"
-            >
+            <Button onClick={toggleMute} variant="ghost" size="icon" className="hover:bg-white/20 text-white">
               {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
             </Button>
             <Slider
@@ -482,17 +719,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           {isPlaying && !isLoading && currentPlayer && (
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              <span className="text-xs text-red-500 font-semibold">● EN DIRECT</span>
-              <span className="text-xs text-gray-400 ml-2">({currentPlayer})</span>
+              <span className="text-xs text-red-500 font-semibold">● EN DIRECT ({currentPlayer})</span>
             </div>
           )}
 
-          <Button
-            onClick={toggleFullscreen}
-            variant="ghost"
-            size="icon"
-            className="hover:bg-white/20 text-white"
-          >
+          <Button onClick={toggleFullscreen} variant="ghost" size="icon" className="hover:bg-white/20 text-white">
             <Maximize className="w-5 h-5" />
           </Button>
         </div>
