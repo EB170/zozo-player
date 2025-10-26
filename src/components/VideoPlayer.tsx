@@ -10,6 +10,8 @@ import { QualityIndicator } from "./QualityIndicator";
 import { useBandwidthMonitor } from "@/hooks/useBandwidthMonitor";
 import { useErrorRecovery } from "@/hooks/useErrorRecovery";
 import { useVideoMetrics } from "@/hooks/useVideoMetrics";
+import { useRealBandwidth } from "@/hooks/useRealBandwidth";
+import { parseHLSManifest, recommendQuality, StreamQuality } from "@/utils/manifestParser";
 import { toast } from "sonner";
 
 interface VideoPlayerProps {
@@ -18,7 +20,7 @@ interface VideoPlayerProps {
 }
 
 const getProxiedUrl = (originalUrl: string): string => {
-  const projectId = "wxkvljkvqcamktlwfmfx";
+  const projectId = import.meta.env.VITE_SUPABASE_PROJECT_ID || "wxkvljkvqcamktlwfmfx";
   const proxyUrl = `https://${projectId}.supabase.co/functions/v1/stream-proxy`;
   return `${proxyUrl}?url=${encodeURIComponent(originalUrl)}`;
 };
@@ -57,11 +59,14 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const [quality, setQuality] = useState('auto');
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [showSeekFeedback, setShowSeekFeedback] = useState<{direction: 'forward' | 'backward', show: boolean}>({direction: 'forward', show: false});
+  const [availableQualities, setAvailableQualities] = useState<StreamQuality[]>([]);
+  const [manifestUrl, setManifestUrl] = useState<string>('');
 
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
 
   // Hooks professionnels
   const bandwidthMetrics = useBandwidthMonitor();
+  const realBandwidth = useRealBandwidth();
   const errorRecovery = useErrorRecovery();
   const activeVideo = activeVideoRef.current === 1 ? video1Ref.current : video2Ref.current;
   const videoMetrics = useVideoMetrics(activeVideo);
@@ -138,9 +143,35 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     cleanupPlayer(mpegts2Ref, hls2Ref);
   };
 
-  // Adapter buffer selon bandwidth et qualité
+  // Parser manifest HLS pour détecter qualités disponibles
+  useEffect(() => {
+    if (streamUrl.includes('.m3u8') && playerTypeRef.current === 'hls') {
+      parseHLSManifest(streamUrl).then(qualities => {
+        if (qualities.length > 0) {
+          setAvailableQualities(qualities);
+          setManifestUrl(streamUrl);
+          console.log('📺 Qualités HLS détectées:', qualities.map(q => q.label));
+        }
+      });
+    } else {
+      // Pour MPEG-TS, pas de qualités multiples (stream direct)
+      setAvailableQualities([]);
+    }
+  }, [streamUrl]);
+
+  // Auto quality selection basée sur real bandwidth
+  useEffect(() => {
+    if (quality === 'auto' && availableQualities.length > 0 && realBandwidth.averageBitrate > 0) {
+      const recommended = recommendQuality(realBandwidth.averageBitrate, availableQualities);
+      if (recommended) {
+        console.log(`🎯 Auto-quality: ${recommended.label} (bandwidth: ${realBandwidth.averageBitrate.toFixed(2)} Mbps)`);
+      }
+    }
+  }, [quality, availableQualities, realBandwidth.averageBitrate]);
+
+  // Adapter buffer selon bandwidth réel et qualité
   const getOptimalBufferSize = () => {
-    const bandwidth = bandwidthMetrics.averageBandwidth || bandwidthMetrics.currentBandwidth;
+    const bandwidth = realBandwidth.averageBitrate || bandwidthMetrics.averageBandwidth || bandwidthMetrics.currentBandwidth;
     const speed = networkSpeedRef.current;
     
     let baseSize = 1024;
@@ -150,9 +181,10 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     else if (quality === 'medium') baseSize = 1024;
     else if (quality === 'low') baseSize = 768;
     else {
-      // Auto - adapter selon bandwidth
-      if (bandwidth > 8) baseSize = 1536;
-      else if (bandwidth > 4) baseSize = 1024;
+      // Auto - adapter selon bandwidth RÉEL
+      if (bandwidth > 10) baseSize = 2048;
+      else if (bandwidth > 6) baseSize = 1536;
+      else if (bandwidth > 3) baseSize = 1024;
       else baseSize = 768;
     }
     
@@ -160,6 +192,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     if (speed === 'slow') baseSize = Math.round(baseSize * 0.7);
     else if (speed === 'fast') baseSize = Math.round(baseSize * 1.2);
     
+    console.log(`🔧 Buffer size: ${baseSize}KB (bandwidth: ${bandwidth.toFixed(2)} Mbps, quality: ${quality})`);
     return baseSize;
   };
 
@@ -209,7 +242,21 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const createHlsPlayer = (videoElement: HTMLVideoElement) => {
     if (!Hls.isSupported()) return null;
     
-    const url = getProxiedUrl(streamUrl);
+    // Utiliser manifest URL si qualité spécifique sélectionnée, sinon URL de base
+    let url = streamUrl;
+    if (quality !== 'auto' && availableQualities.length > 0) {
+      const selectedQuality = availableQualities.find(q => 
+        (quality === 'high' && q.label.includes('1080p')) ||
+        (quality === 'medium' && q.label.includes('720p')) ||
+        (quality === 'low' && q.label.includes('480p'))
+      );
+      if (selectedQuality && selectedQuality.url) {
+        url = selectedQuality.url;
+        console.log(`🎬 HLS quality switch: ${selectedQuality.label}`);
+      }
+    }
+    
+    url = getProxiedUrl(url);
     
     const bufferLength = networkSpeedRef.current === 'fast' ? 60 : networkSpeedRef.current === 'medium' ? 40 : 30;
     
@@ -418,8 +465,8 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const startAutoSwitch = useCallback(() => {
     if (switchTimerRef.current) clearInterval(switchTimerRef.current);
     
-    // Adapter intervalle selon qualité réseau
-    const bandwidth = bandwidthMetrics.averageBandwidth || bandwidthMetrics.currentBandwidth;
+    // Adapter intervalle selon bandwidth RÉEL
+    const bandwidth = realBandwidth.averageBitrate || bandwidthMetrics.averageBandwidth || bandwidthMetrics.currentBandwidth;
     let interval = 15000;
     
     if (bandwidth > 10) interval = 10000; // Connexion excellente
@@ -427,13 +474,15 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     else if (bandwidth > 2) interval = 20000; // Connexion moyenne
     else interval = 30000; // Connexion faible
     
+    console.log(`⏱️ Auto-switch interval: ${interval/1000}s (real bandwidth: ${bandwidth.toFixed(2)} Mbps)`);
+    
     switchTimerRef.current = setInterval(() => {
       if (!isTransitioning) {
         console.log(`🔄 Auto switch planifié (${interval/1000}s)`);
         switchToNext();
       }
     }, interval);
-  }, [switchToNext, isTransitioning, bandwidthMetrics]);
+  }, [switchToNext, isTransitioning, realBandwidth, bandwidthMetrics]);
 
   // Double-tap seek pour mobile
   const handleVideoClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -697,6 +746,7 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         networkSpeed={networkSpeedRef.current}
         bandwidthMbps={bandwidthMetrics.currentBandwidth}
         bandwidthTrend={bandwidthMetrics.trend}
+        realBitrate={realBandwidth.currentBitrate}
       />
 
       {/* Settings overlay */}
@@ -704,9 +754,17 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
         playbackRate={playbackRate}
         onPlaybackRateChange={setPlaybackRate}
         quality={quality}
-        onQualityChange={setQuality}
+        onQualityChange={(newQuality) => {
+          setQuality(newQuality);
+          console.log(`🎬 Quality changed to: ${newQuality}`);
+          toast.info(`Qualité: ${newQuality}`, {
+            description: availableQualities.length > 0 ? 'Changement appliqué' : 'Mode adaptatif',
+            duration: 2000,
+          });
+        }}
         isVisible={showSettings}
         onClose={() => setShowSettings(false)}
+        availableQualities={availableQualities}
       />
 
       {/* Seek feedback animation */}

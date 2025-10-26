@@ -2,6 +2,7 @@ import { Settings, Zap, Gauge, X } from "lucide-react";
 import { Label } from "./ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Button } from "./ui/button";
+import { StreamQuality } from "@/utils/manifestParser";
 
 interface PlayerSettingsProps {
   playbackRate: number;
@@ -10,6 +11,7 @@ interface PlayerSettingsProps {
   onQualityChange: (quality: string) => void;
   isVisible: boolean;
   onClose: () => void;
+  availableQualities?: StreamQuality[];
 }
 
 export const PlayerSettings = ({ 
@@ -18,9 +20,12 @@ export const PlayerSettings = ({
   quality,
   onQualityChange,
   isVisible,
-  onClose
+  onClose,
+  availableQualities = []
 }: PlayerSettingsProps) => {
   if (!isVisible) return null;
+
+  const hasMultipleQualities = availableQualities.length > 0;
 
   return (
     <div className="absolute top-4 left-4 bg-black/90 backdrop-blur-xl border border-primary/40 rounded-xl p-4 space-y-4 w-64 shadow-2xl z-30 animate-in fade-in slide-in-from-left-2 duration-300">
@@ -74,18 +79,38 @@ export const PlayerSettings = ({
             </SelectTrigger>
             <SelectContent className="bg-popover border-border">
               <SelectItem value="auto">⚡ Auto (Adaptatif)</SelectItem>
-              <SelectItem value="high">🎯 Haute - FHD</SelectItem>
-              <SelectItem value="medium">📺 Moyenne - HD</SelectItem>
-              <SelectItem value="low">💾 Basse - SD</SelectItem>
+              {hasMultipleQualities ? (
+                <>
+                  {availableQualities.map(q => (
+                    <SelectItem key={q.id} value={q.label.toLowerCase()}>
+                      {q.label} - {(q.bandwidth / 1000000).toFixed(1)} Mbps
+                    </SelectItem>
+                  ))}
+                </>
+              ) : (
+                <>
+                  <SelectItem value="high">🎯 Haute - FHD</SelectItem>
+                  <SelectItem value="medium">📺 Moyenne - HD</SelectItem>
+                  <SelectItem value="low">💾 Basse - SD</SelectItem>
+                </>
+              )}
             </SelectContent>
           </Select>
+          {hasMultipleQualities && (
+            <p className="text-[10px] text-green-400">
+              ✓ {availableQualities.length} qualités HLS détectées
+            </p>
+          )}
         </div>
       </div>
 
       <div className="pt-2 border-t border-white/10">
         <div className="text-[10px] text-white/50 space-y-1">
-          <p>💡 Auto s'adapte à votre connexion</p>
+          <p>💡 Auto s'adapte à votre connexion en temps réel</p>
           <p>⚡ Vitesse 2x pour rattrapage rapide</p>
+          {hasMultipleQualities && (
+            <p>📊 Mesure du débit réel activée</p>
+          )}
         </div>
       </div>
     </div>

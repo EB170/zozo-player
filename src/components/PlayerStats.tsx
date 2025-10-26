@@ -10,6 +10,7 @@ interface PlayerStatsProps {
   networkSpeed: 'fast' | 'medium' | 'slow';
   bandwidthMbps: number;
   bandwidthTrend: 'stable' | 'increasing' | 'decreasing';
+  realBitrate?: number; // Ajout du bitrate réel mesuré
 }
 
 export const PlayerStats = ({ 
@@ -17,10 +18,11 @@ export const PlayerStats = ({
   playerType, 
   useProxy, 
   bufferHealth, 
-  isVisible,
+  isVisible, 
   networkSpeed,
   bandwidthMbps,
-  bandwidthTrend
+  bandwidthTrend,
+  realBitrate = 0
 }: PlayerStatsProps) => {
   const metrics = useVideoMetrics(videoElement);
 
@@ -155,6 +157,16 @@ export const PlayerStats = ({
             </span>
             <span className="font-mono font-semibold">{bandwidthMbps.toFixed(1)} Mb/s</span>
           </div>
+
+          {realBitrate > 0 && (
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-white/70 text-[11px]">
+                <Zap className="w-3.5 h-3.5" />
+                Débit réel mesuré
+              </span>
+              <span className="font-mono font-semibold text-green-400">{realBitrate.toFixed(2)} Mb/s</span>
+            </div>
+          )}
         </div>
 
         {/* Performance Metrics */}
