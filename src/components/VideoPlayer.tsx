@@ -25,17 +25,14 @@ const getProxiedUrl = (originalUrl: string): string => {
 
 export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) => {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const videoRef2 = useRef<HTMLVideoElement>(null); // DUAL BUFFER
   const containerRef = useRef<HTMLDivElement>(null);
   const playerContainerRef = useRef<HTMLDivElement>(null);
   
   const mpegtsRef = useRef<any>(null);
-  const mpegtsRef2 = useRef<any>(null); // DUAL BUFFER
   const hlsRef = useRef<Hls | null>(null);
   const videojsRef = useRef<any>(null);
   const clapprRef = useRef<any>(null);
-  
-  const activeVideoRef = useRef<1 | 2>(1); // Which video is active
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   
   const [currentPlayer, setCurrentPlayer] = useState<PlayerType>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -51,46 +48,47 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
   const { toast } = useToast();
 
   const cleanupPlayers = () => {
-    // Safe cleanup with null checks
+    if (reconnectTimerRef.current) {
+      clearInterval(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    
     if (mpegtsRef.current) {
       try {
-        if (mpegtsRef.current.destroy) mpegtsRef.current.destroy();
-      } catch (e) {}
+        mpegtsRef.current.unload();
+        mpegtsRef.current.detachMediaElement();
+        mpegtsRef.current.destroy();
+      } catch (e) {
+        console.log('Cleanup error:', e);
+      }
       mpegtsRef.current = null;
     }
-    if (mpegtsRef2.current) {
-      try {
-        if (mpegtsRef2.current.destroy) mpegtsRef2.current.destroy();
-      } catch (e) {}
-      mpegtsRef2.current = null;
-    }
+    
     if (hlsRef.current) {
       try {
         hlsRef.current.destroy();
       } catch (e) {}
       hlsRef.current = null;
     }
+    
     if (videojsRef.current) {
       try {
         videojsRef.current.dispose();
       } catch (e) {}
       videojsRef.current = null;
     }
+    
     if (clapprRef.current) {
       try {
         clapprRef.current.destroy();
       } catch (e) {}
       clapprRef.current = null;
     }
+    
     if (videoRef.current) {
       videoRef.current.pause();
       videoRef.current.removeAttribute('src');
       videoRef.current.load();
-    }
-    if (videoRef2.current) {
-      videoRef2.current.pause();
-      videoRef2.current.removeAttribute('src');
-      videoRef2.current.load();
     }
   };
 
@@ -135,195 +133,111 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     });
   };
 
-  // MPEGTS.js - SEAMLESS DUAL-BUFFER NO-INTERRUPTION MODE
+  // MPEGTS.js - SINGLE PLAYER WITH PROACTIVE RECONNECTION
   const tryMpegtsPlayer = (): Promise<boolean> => {
     return new Promise(async (resolve) => {
-      if (!videoRef.current || !videoRef2.current || !mpegts.isSupported()) {
-        console.log('mpegts.js not supported or refs missing');
+      if (!videoRef.current || !mpegts.isSupported()) {
+        console.log('mpegts.js not supported');
         resolve(false);
         return;
       }
 
       console.log('==================================================');
-      console.log('🎬 SEAMLESS DUAL-BUFFER MODE - ZERO INTERRUPTION...');
-      const video1 = videoRef.current;
-      const video2 = videoRef2.current;
+      console.log('🎬 MPEGTS.JS - PROACTIVE RECONNECTION MODE...');
+      const video = videoRef.current;
       const proxiedUrl = getProxiedUrl(streamUrl);
       
-      let player1: any = null;
-      let player2: any = null;
       let isActive = true;
-      let switchInterval: NodeJS.Timeout | null = null;
-      let currentActive: 1 | 2 = 1;
+      let player: any = null;
       
-      // Cleanup both players
-      const cleanup = () => {
-        console.log('🧹 Cleaning up dual buffers...');
-        isActive = false;
+      // Create and start player
+      const createPlayer = () => {
+        console.log('🎮 Creating mpegts player...');
         
-        if (switchInterval) {
-          clearInterval(switchInterval);
-          switchInterval = null;
-        }
-        
-        if (player1) {
-          try {
-            player1.unload();
-            player1.detachMediaElement();
-            player1.destroy();
-          } catch (e) {}
-          player1 = null;
-        }
-        
-        if (player2) {
-          try {
-            player2.unload();
-            player2.detachMediaElement();
-            player2.destroy();
-          } catch (e) {}
-          player2 = null;
-        }
-        
-        video1.removeAttribute('src');
-        video1.load();
-        video2.removeAttribute('src');
-        video2.load();
-      };
-      
-      // Create a player instance on a video element
-      const createPlayerOnVideo = (video: HTMLVideoElement, playerRef: 'player1' | 'player2') => {
-        console.log(`🎮 Creating player on ${playerRef}...`);
-        
-        const player = mpegts.createPlayer({
+        const newPlayer = mpegts.createPlayer({
           type: 'mpegts',
           isLive: true,
           url: proxiedUrl,
         }, {
           enableWorker: true,
           enableStashBuffer: true,
-          stashInitialSize: 1024, // LARGE buffer
+          stashInitialSize: 768,
           autoCleanupSourceBuffer: true,
-          autoCleanupMaxBackwardDuration: 15,
-          autoCleanupMinBackwardDuration: 5,
+          autoCleanupMaxBackwardDuration: 12,
+          autoCleanupMinBackwardDuration: 3,
           liveBufferLatencyChasing: false,
           fixAudioTimestampGap: true,
         });
 
-        player.attachMediaElement(video);
-        player.load();
+        newPlayer.attachMediaElement(video);
+        newPlayer.load();
         
         video.addEventListener('loadedmetadata', async () => {
-          console.log(`📋 Metadata loaded on ${playerRef}`);
+          console.log('📋 Metadata loaded');
           video.volume = volume;
           video.muted = isMuted;
           
           try {
             await video.play();
-            console.log(`▶️ ${playerRef} playing`);
+            console.log('▶️ Playing');
           } catch (err) {
-            console.log(`❌ ${playerRef} play failed:`, err);
+            console.log('❌ Play failed:', err);
           }
         }, { once: true });
-        
-        // Ignore ended events - we switch before they happen
-        video.addEventListener('ended', (e) => {
-          e.preventDefault();
-          console.log(`⚠️ ${playerRef} ended - but we should have switched already`);
-        });
 
-        return player;
+        return newPlayer;
       };
       
-      // Seamless switch between players
-      const switchPlayer = () => {
-        if (!isActive) return;
-        
-        const nextActive: 1 | 2 = currentActive === 1 ? 2 : 1;
-        const currentVideo = currentActive === 1 ? video1 : video2;
-        const nextVideo = nextActive === 1 ? video1 : video2;
-        const currentPlayer = currentActive === 1 ? player1 : player2;
-        const nextPlayer = nextActive === 1 ? player1 : player2;
-        
-        console.log(`🔄 SEAMLESS SWITCH: ${currentActive} → ${nextActive}`);
-        
-        // Make next video visible and playing
-        nextVideo.style.opacity = '1';
-        nextVideo.style.zIndex = '2';
-        if (nextVideo.paused) {
-          nextVideo.play().catch(e => console.log('Switch play error:', e));
-        }
-        
-        // Fade out current video
-        currentVideo.style.opacity = '0';
-        currentVideo.style.zIndex = '1';
-        
-        // Update active reference
-        currentActive = nextActive;
-        activeVideoRef.current = nextActive;
-        
-        // After transition, recreate the old player for next switch
-        setTimeout(() => {
-          if (!isActive) return;
+      // Proactive reconnection BEFORE MediaSource ends
+      const startProactiveReconnection = () => {
+        reconnectTimerRef.current = setInterval(() => {
+          if (!isActive || !player) return;
           
-          // Destroy old player
-          if (currentPlayer) {
-            try {
-              currentPlayer.unload();
-              currentPlayer.detachMediaElement();
-              currentPlayer.destroy();
-            } catch (e) {}
+          console.log('🔄 PROACTIVE RECONNECTION (every 30s to prevent cuts)...');
+          
+          const currentTime = video.currentTime;
+          const wasPlaying = !video.paused;
+          
+          try {
+            // Clean destroy
+            player.unload();
+            player.detachMediaElement();
+            player.destroy();
+          } catch (e) {
+            console.log('Reconnect cleanup error:', e);
           }
           
-          // Recreate it fresh
-          const newPlayer = createPlayerOnVideo(currentVideo, currentActive === 1 ? 'player2' : 'player1');
-          if (currentActive === 1) {
-            player2 = newPlayer;
-            mpegtsRef2.current = newPlayer;
-          } else {
-            player1 = newPlayer;
-            mpegtsRef.current = newPlayer;
+          // Create fresh player
+          player = createPlayer();
+          mpegtsRef.current = player;
+          
+          // Resume from where we were
+          if (wasPlaying) {
+            setTimeout(() => {
+              video.play().catch(e => console.log('Resume error:', e));
+            }, 500);
           }
           
-          console.log(`♻️ Recreated ${currentActive === 1 ? 'player2' : 'player1'} for next switch`);
-        }, 1000);
+          console.log('✅ Reconnection complete');
+        }, 30000); // Every 30 seconds
       };
       
-      // Initialize both players
-      console.log('🚀 Initializing DUAL BUFFER system...');
+      // Initialize
+      player = createPlayer();
+      mpegtsRef.current = player;
       
-      // Create both players
-      player1 = createPlayerOnVideo(video1, 'player1');
-      mpegtsRef.current = player1;
-      
-      // Start with slight delay to avoid race
-      setTimeout(() => {
-        player2 = createPlayerOnVideo(video2, 'player2');
-        mpegtsRef2.current = player2;
-      }, 2000);
-      
-      // Set initial visibility
-      video1.style.opacity = '1';
-      video1.style.zIndex = '2';
-      video1.style.transition = 'opacity 0.5s ease';
-      
-      video2.style.opacity = '0';
-      video2.style.zIndex = '1';
-      video2.style.transition = 'opacity 0.5s ease';
-      
-      // AUTOMATIC SWITCH every 25 seconds (before MediaSource ends at ~38s)
-      switchInterval = setInterval(() => {
-        if (!isActive) return;
-        switchPlayer();
-      }, 25000);
-      
-      // Initial verification on video1
+      // Initial verification
       let resolved = false;
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
           console.log('❌ Initial timeout');
           isActive = false;
-          cleanup();
+          if (player) {
+            try {
+              player.destroy();
+            } catch (e) {}
+          }
           resolve(false);
         }
       }, 15000);
@@ -331,12 +245,16 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       setTimeout(async () => {
         if (resolved) return;
         
-        const hasData = await verifyRealPlayback(video1);
+        const hasData = await verifyRealPlayback(video);
         
         if (hasData) {
           resolved = true;
           clearTimeout(timeout);
-          console.log('✅ SEAMLESS DUAL-BUFFER MODE ACTIVE - ZERO INTERRUPTION!');
+          console.log('✅ MPEGTS.JS ACTIVE - Starting proactive reconnection timer');
+          
+          // Start the proactive reconnection system
+          startProactiveReconnection();
+          
           setCurrentPlayer('mpegts');
           setIsPlaying(true);
           setHasRealData(true);
@@ -346,7 +264,11 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
           clearTimeout(timeout);
           console.log('❌ No real data');
           isActive = false;
-          cleanup();
+          if (player) {
+            try {
+              player.destroy();
+            } catch (e) {}
+          }
           resolve(false);
         }
       }, 4000);
@@ -761,20 +683,10 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
 
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
-    
-    // Also attach to video2
-    if (videoRef2.current) {
-      videoRef2.current.addEventListener('play', handlePlay);
-      videoRef2.current.addEventListener('pause', handlePause);
-    }
 
     return () => {
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('pause', handlePause);
-      if (videoRef2.current) {
-        videoRef2.current.removeEventListener('play', handlePlay);
-        videoRef2.current.removeEventListener('pause', handlePause);
-      }
     };
   }, []);
 
@@ -782,13 +694,12 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     if (clapprRef.current) {
       clapprRef.current.setVolume(isMuted ? 0 : volume * 100);
     }
-    // Apply to both videos
-    [videoRef.current, videoRef2.current].forEach(video => {
-      if (video) {
-        video.volume = isMuted ? 0 : volume;
-        video.muted = isMuted;
-      }
-    });
+    
+    if (videoRef.current) {
+      videoRef.current.volume = isMuted ? 0 : volume;
+      videoRef.current.muted = isMuted;
+    }
+    
     if (videojsRef.current) {
       videojsRef.current.volume(isMuted ? 0 : volume);
       videojsRef.current.muted(isMuted);
@@ -810,12 +721,8 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
       isPlaying ? clapprRef.current.pause() : clapprRef.current.play();
     } else if (videojsRef.current) {
       isPlaying ? videojsRef.current.pause() : videojsRef.current.play();
-    } else {
-      // For dual buffer mode, control both videos
-      const activeVideo = activeVideoRef.current === 1 ? videoRef.current : videoRef2.current;
-      if (activeVideo) {
-        isPlaying ? activeVideo.pause() : activeVideo.play().catch(() => {});
-      }
+    } else if (videoRef.current) {
+      isPlaying ? videoRef.current.pause() : videoRef.current.play().catch(() => {});
     }
   };
 
@@ -835,18 +742,10 @@ export const VideoPlayer = ({ streamUrl, autoPlay = true }: VideoPlayerProps) =>
     >
       <div ref={playerContainerRef} className="absolute inset-0" />
       
-      {/* DUAL VIDEO BUFFERS for seamless switching */}
+      {/* SINGLE VIDEO ELEMENT */}
       <div data-vjs-player className="absolute inset-0">
         <video 
           ref={videoRef} 
-          className="video-js vjs-default-skin absolute inset-0 w-full h-full object-contain" 
-          playsInline 
-          style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
-        />
-      </div>
-      <div className="absolute inset-0">
-        <video 
-          ref={videoRef2} 
           className="video-js vjs-default-skin absolute inset-0 w-full h-full object-contain" 
           playsInline 
           style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
