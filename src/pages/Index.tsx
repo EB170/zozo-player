@@ -6,27 +6,45 @@ import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { Video, Tv } from "lucide-react";
-
-const PREDEFINED_CHANNELS = [
-  { name: "Eurosport 1 FHD", url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=250665&extension=ts" },
-  { name: "Eurosport 2 FHD", url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=250664&extension=ts" },
-  { name: "Ligue 1+ FHD", url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=1523608&extension=ts" },
-  { name: "Ligue 1+ 2 FHD", url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=1567322&extension=ts" },
-  { name: "Ligue 1+ 3 FHD", url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=1567324&extension=ts" },
-  { name: "Ligue 1+ 4 FHD", url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=1567325&extension=ts" },
-  { name: "RMC Sport 1 FHD", url: "http://eagle2024.xyz:80/play/live.php?mac=00:1A:79:84:0F:1B&stream=/play/live.php?mac=00:1A:79:BF:47:35&stream=32835&extension=ts" },
-  { name: "Canal+ FHD", url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=148474&extension=ts" },
-  { name: "Canal+ Foot FHD", url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=/play/live.php?mac=00:1A:79:CD:E0:3F&stream=256629&extension=ts" },
-  { name: "Canal+ Sport 360 FHD", url: "http://eagle2024.xyz:80/play/live.php?mac=00:1A:79:CD:E0:3F&stream=256628&extension=ts" },
-  { name: "Canal+ Sport FHD", url: "http://eagle2024.xyz:80/play/live.php?mac=00:1A:79:BF:47:35&stream=250679&extension=ts" },
-];
-
+const PREDEFINED_CHANNELS = [{
+  name: "Eurosport 1 FHD",
+  url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=250665&extension=ts"
+}, {
+  name: "Eurosport 2 FHD",
+  url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=250664&extension=ts"
+}, {
+  name: "Ligue 1+ FHD",
+  url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=1523608&extension=ts"
+}, {
+  name: "Ligue 1+ 2 FHD",
+  url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=1567322&extension=ts"
+}, {
+  name: "Ligue 1+ 3 FHD",
+  url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=1567324&extension=ts"
+}, {
+  name: "Ligue 1+ 4 FHD",
+  url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=1567325&extension=ts"
+}, {
+  name: "RMC Sport 1 FHD",
+  url: "http://eagle2024.xyz:80/play/live.php?mac=00:1A:79:84:0F:1B&stream=/play/live.php?mac=00:1A:79:BF:47:35&stream=32835&extension=ts"
+}, {
+  name: "Canal+ FHD",
+  url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=148474&extension=ts"
+}, {
+  name: "Canal+ Foot FHD",
+  url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=/play/live.php?mac=00:1A:79:CD:E0:3F&stream=256629&extension=ts"
+}, {
+  name: "Canal+ Sport 360 FHD",
+  url: "http://eagle2024.xyz:80/play/live.php?mac=00:1A:79:CD:E0:3F&stream=256628&extension=ts"
+}, {
+  name: "Canal+ Sport FHD",
+  url: "http://eagle2024.xyz:80/play/live.php?mac=00:1A:79:BF:47:35&stream=250679&extension=ts"
+}];
 const Index = () => {
   const [streamUrl, setStreamUrl] = useState("");
   const [activeUrl, setActiveUrl] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [selectedChannel, setSelectedChannel] = useState("");
-
   const handleLoadStream = () => {
     if (!urlInput.trim()) {
       toast.error("Veuillez entrer une URL de flux");
@@ -43,7 +61,6 @@ const Index = () => {
       toast.error("URL invalide");
     }
   };
-
   const handleChannelSelect = (channelName: string) => {
     const channel = PREDEFINED_CHANNELS.find(ch => ch.name === channelName);
     if (channel) {
@@ -54,15 +71,12 @@ const Index = () => {
       toast.success(`Chargement de ${channel.name}`);
     }
   };
-
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
       handleLoadStream();
     }
   };
-
-  return (
-    <div className="min-h-screen bg-background p-4 md:p-8">
+  return <div className="min-h-screen bg-background p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-8">
         {/* Header */}
         <div className="text-center space-y-4">
@@ -70,13 +84,9 @@ const Index = () => {
             <div className="p-3 rounded-xl bg-gradient-to-br from-primary to-accent shadow-[var(--shadow-glow)]">
               <Video className="w-8 h-8 text-primary-foreground" />
             </div>
-            <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent">
-              Live Stream Player
-            </h1>
+            <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent">EnzoTV</h1>
           </div>
-          <p className="text-muted-foreground text-lg max-w-2xl mx-auto">
-            Player haute qualité pour flux TS et HLS avec reconnexion automatique et latence minimale
-          </p>
+          
         </div>
 
         {/* Channel Selection & URL Input Card */}
@@ -93,11 +103,9 @@ const Index = () => {
                   <SelectValue placeholder="Sélectionner une chaîne..." />
                 </SelectTrigger>
                 <SelectContent className="bg-popover border-border max-h-[300px]">
-                  {PREDEFINED_CHANNELS.map((channel) => (
-                    <SelectItem key={channel.name} value={channel.name} className="cursor-pointer">
+                  {PREDEFINED_CHANNELS.map(channel => <SelectItem key={channel.name} value={channel.name} className="cursor-pointer">
                       {channel.name}
-                    </SelectItem>
-                  ))}
+                    </SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -108,18 +116,8 @@ const Index = () => {
                 Ou entrez une URL personnalisée
               </label>
               <div className="flex flex-col sm:flex-row gap-3">
-                <Input
-                  type="text"
-                  placeholder="https://exemple.com/stream.m3u8 ou .ts"
-                  value={urlInput}
-                  onChange={(e) => setUrlInput(e.target.value)}
-                  onKeyPress={handleKeyPress}
-                  className="flex-1 bg-input border-border text-foreground placeholder:text-muted-foreground"
-                />
-                <Button
-                  onClick={handleLoadStream}
-                  className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity shadow-lg"
-                >
+                <Input type="text" placeholder="https://exemple.com/stream.m3u8 ou .ts" value={urlInput} onChange={e => setUrlInput(e.target.value)} onKeyPress={handleKeyPress} className="flex-1 bg-input border-border text-foreground placeholder:text-muted-foreground" />
+                <Button onClick={handleLoadStream} className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity shadow-lg">
                   Charger le flux
                 </Button>
               </div>
@@ -132,12 +130,9 @@ const Index = () => {
         </Card>
 
         {/* Video Player */}
-        {streamUrl ? (
-          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+        {streamUrl ? <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
             <VideoPlayer streamUrl={streamUrl} autoPlay />
-          </div>
-        ) : (
-          <Card className="p-12 bg-card border-border border-dashed">
+          </div> : <Card className="p-12 bg-card border-border border-dashed">
             <div className="text-center space-y-3">
               <div className="inline-flex p-4 rounded-full bg-secondary">
                 <Video className="w-8 h-8 text-muted-foreground" />
@@ -147,8 +142,7 @@ const Index = () => {
                 Entrez l'URL d'un flux TS ou HLS ci-dessus pour commencer la lecture
               </p>
             </div>
-          </Card>
-        )}
+          </Card>}
 
         {/* Info Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -172,8 +166,6 @@ const Index = () => {
           </Card>
         </div>
       </div>
-    </div>
-  );
+    </div>;
 };
-
 export default Index;
