@@ -81,10 +81,8 @@ const Index = () => {
         {/* Header */}
         <div className="text-center space-y-4">
           <div className="flex items-center justify-center gap-3 mb-2">
-            <div className="p-3 rounded-xl bg-gradient-to-br from-primary to-accent shadow-[var(--shadow-glow)]">
-              <Video className="w-8 h-8 text-primary-foreground" />
-            </div>
-            <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent">EnzoTV</h1>
+            
+            
           </div>
           
         </div>
