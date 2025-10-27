@@ -214,13 +214,13 @@ export const VideoPlayerHybrid = ({
     }, {
       enableWorker: true,
       enableStashBuffer: true,
-      stashInitialSize: 4 * 1024 * 1024,      // 4MB buffer initial pour stabilité maximale
+      stashInitialSize: 5 * 1024 * 1024,      // 5MB buffer initial (augmenté pour stabilité extrême)
       autoCleanupSourceBuffer: true,
-      autoCleanupMaxBackwardDuration: 60,     // 60s historique
-      autoCleanupMinBackwardDuration: 30,     // 30s minimum
+      autoCleanupMaxBackwardDuration: 90,     // 90s historique (augmenté)
+      autoCleanupMinBackwardDuration: 45,     // 45s minimum (augmenté)
       liveBufferLatencyChasing: false,        // DÉSACTIVÉ pour stabilité
-      liveBufferLatencyMaxLatency: 15,        // Très tolérant
-      liveBufferLatencyMinRemain: 6,          // Garder 6s minimum
+      liveBufferLatencyMaxLatency: 20,        // Tolérance maximale (augmenté à 20s)
+      liveBufferLatencyMinRemain: 8,          // Garder 8s minimum (augmenté)
       fixAudioTimestampGap: true,
       lazyLoad: false,                        // Désactivé pour prefetch immédiat
       deferLoadAfterSourceOpen: false,
@@ -254,7 +254,7 @@ export const VideoPlayerHybrid = ({
     player.load();
     mpegtsRef.current = player;
     
-    // Watchdog: plus réactif pour détecter et corriger rapidement
+    // Watchdog: ultra-réactif pour stabilité maximale sur longue durée
     const watchdogInterval = setInterval(() => {
       if (!video || video.readyState < 2) return;
       
@@ -262,13 +262,16 @@ export const VideoPlayerHybrid = ({
         ? video.buffered.end(0) - video.currentTime 
         : 0;
       
-      // Si buffer critique (<1s) ET vidéo pas en pause volontaire
-      if (bufferLevel < 1.0 && !video.paused) {
-        console.warn(`🚨 Buffer critique (${bufferLevel.toFixed(2)}s), recovery...`);
+      // Buffer critique: seuil augmenté à 1.5s pour plus de marge
+      if (bufferLevel < 1.5 && !video.paused) {
+        console.warn(`🚨 Buffer critique (${bufferLevel.toFixed(2)}s), recovery immédiat...`);
         try {
           if (player && typeof player.unload === 'function') {
+            const currentTime = video.currentTime;
             player.unload();
             player.load();
+            // Restaurer la position avec un léger décalage pour éviter les trous
+            video.currentTime = Math.max(0, currentTime - 0.5);
             video.play().catch(() => {});
           }
         } catch (e) {
@@ -276,20 +279,43 @@ export const VideoPlayerHybrid = ({
         }
       }
       
-      // Si vidéo gelée (pas en pause mais pas de timeUpdate depuis 2s)
+      // Détection de gel: seuil réduit à 1.5s pour réaction plus rapide
       const now = Date.now();
       if (!video.paused && video.currentTime === (video as any)._lastCurrentTime) {
         const frozenTime = now - ((video as any)._lastTimeUpdate || now);
-        if (frozenTime > 2000) {
-          console.warn('🚨 Vidéo gelée détectée, tentative play()...');
-          video.play().catch(() => {});
+        if (frozenTime > 1500) {
+          console.warn('🚨 Vidéo gelée détectée, recovery multi-étapes...');
+          
+          // Essayer d'abord un simple play()
+          video.play().catch(() => {
+            // Si ça échoue, reload complet
+            console.warn('🔄 Simple play() échoué, reload complet...');
+            try {
+              if (player && typeof player.unload === 'function') {
+                const currentTime = video.currentTime;
+                player.unload();
+                player.load();
+                video.currentTime = currentTime;
+                video.play().catch(() => {});
+              }
+            } catch (e) {
+              console.error('Full reload failed:', e);
+            }
+          });
+          
           (video as any)._lastTimeUpdate = now;
         }
       } else {
         (video as any)._lastCurrentTime = video.currentTime;
         (video as any)._lastTimeUpdate = now;
       }
-    }, 1500);
+      
+      // Détection stall additionnel: vérifier si readyState passe à HAVE_CURRENT_DATA
+      if (video.readyState === 2 && !video.paused) {
+        // HAVE_CURRENT_DATA mais pas HAVE_FUTURE_DATA = problème potentiel
+        console.warn('⚠️ ReadyState=2 détecté, préchargement insuffisant');
+      }
+    }, 1000); // Réduire l'intervalle à 1s pour plus de réactivité
     
     // Stocker watchdog pour cleanup
     (player as any)._watchdogInterval = watchdogInterval;
@@ -387,15 +413,15 @@ export const VideoPlayerHybrid = ({
       debug: hlsDebugMode.current,
       enableWorker: true,
       
-      // ========== BUFFER OPTIMISÉ LONG-TERME ==========
-      maxBufferLength: 45,              // 45s optimal pour long-terme (évite trop de mémoire)
-      maxMaxBufferLength: 60,           // Cap à 60s
-      maxBufferSize: 50 * 1000 * 1000,  // 50MB (évite saturation mémoire)
-      maxBufferHole: 0.5,               // Tolérance 500ms
+      // ========== BUFFER OPTIMISÉ STABILITÉ EXTRÊME ==========
+      maxBufferLength: 60,              // 60s pour maximum stabilité long-terme
+      maxMaxBufferLength: 90,           // Cap à 90s (augmenté)
+      maxBufferSize: 70 * 1000 * 1000,  // 70MB (augmenté pour éviter underrun)
+      maxBufferHole: 0.3,               // Tolérance réduite à 300ms pour meilleure continuité
       
-      // ========== LIVE SYNC ==========
-      liveSyncDurationCount: 3,         // 3 fragments du live
-      liveMaxLatencyDurationCount: 6,   // Max 6 segments de retard
+      // ========== LIVE SYNC - Optimisé stabilité ==========
+      liveSyncDurationCount: 4,         // 4 fragments (augmenté pour marge)
+      liveMaxLatencyDurationCount: 10,  // Max 10 segments (plus tolérant)
       liveDurationInfinity: false,
       
       // ========== BACK BUFFER (NETTOYAGE AUTO) ==========
@@ -920,12 +946,62 @@ export const VideoPlayerHybrid = ({
     }
   };
   const handleMuteToggle = () => setIsMuted(!isMuted);
+  
+  // Plein écran avec support mobile complet (iOS/Android)
   const handleFullscreen = () => {
-    if (!containerRef.current) return;
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
-    } else {
-      containerRef.current.requestFullscreen();
+    const container = containerRef.current;
+    const video = videoRef.current;
+    if (!container || !video) return;
+
+    try {
+      // Vérifier si déjà en plein écran
+      const isFullscreen = !!(
+        document.fullscreenElement ||
+        (document as any).webkitFullscreenElement ||
+        (document as any).mozFullScreenElement ||
+        (document as any).msFullscreenElement
+      );
+
+      if (isFullscreen) {
+        // Sortir du plein écran
+        if (document.exitFullscreen) {
+          document.exitFullscreen();
+        } else if ((document as any).webkitExitFullscreen) {
+          (document as any).webkitExitFullscreen();
+        } else if ((document as any).mozCancelFullScreen) {
+          (document as any).mozCancelFullScreen();
+        } else if ((document as any).msExitFullscreen) {
+          (document as any).msExitFullscreen();
+        }
+      } else {
+        // Entrer en plein écran
+        // Sur iOS, utiliser la vidéo native en plein écran
+        if ((video as any).webkitEnterFullscreen) {
+          (video as any).webkitEnterFullscreen();
+        } else if ((video as any).webkitRequestFullscreen) {
+          (video as any).webkitRequestFullscreen();
+        } else if (container.requestFullscreen) {
+          container.requestFullscreen();
+        } else if ((container as any).webkitRequestFullscreen) {
+          (container as any).webkitRequestFullscreen();
+        } else if ((container as any).mozRequestFullScreen) {
+          (container as any).mozRequestFullScreen();
+        } else if ((container as any).msRequestFullscreen) {
+          (container as any).msRequestFullscreen();
+        }
+        
+        // Verrouiller l'orientation en paysage sur mobile si possible
+        if (screen.orientation && (screen.orientation as any).lock) {
+          (screen.orientation as any).lock('landscape').catch(() => {
+            console.log('Orientation lock not supported');
+          });
+        }
+      }
+      
+      toast.success(isFullscreen ? "Mode normal" : "Mode plein écran");
+    } catch (error) {
+      console.warn('Fullscreen error:', error);
+      toast.error("Mode plein écran non disponible");
     }
   };
   const handlePiP = async () => {
@@ -944,30 +1020,165 @@ export const VideoPlayerHybrid = ({
   };
   const handleQualityChange = useCallback((newQuality: string) => {
     setQuality(newQuality);
+    
     if (playerTypeRef.current === 'hls' && hlsRef.current) {
+      // HLS: changement de niveau direct
       if (newQuality === 'auto') {
         hlsRef.current.currentLevel = -1;
-        toast.info('Qualité automatique');
+        toast.success('⚡ Qualité automatique', {
+          description: 'Adaptation au débit réseau'
+        });
       } else {
-        const qualityMap: {
-          [key: string]: number;
-        } = {
+        const qualityMap: { [key: string]: number } = {
           'low': 0,
           'medium': Math.floor(availableQualities.length / 2),
           'high': availableQualities.length - 1
         };
         const targetLevel = qualityMap[newQuality] || -1;
-        if (targetLevel >= 0) {
+        if (targetLevel >= 0 && targetLevel < availableQualities.length) {
           hlsRef.current.currentLevel = targetLevel;
-          toast.success(`Qualité: ${availableQualities[targetLevel]?.label}`);
+          const quality = availableQualities[targetLevel];
+          toast.success(`Qualité: ${quality?.label}`, {
+            description: `${(quality?.bandwidth / 1000000).toFixed(1)} Mbps`
+          });
         }
       }
-    } else {
-      toast.info(`Qualité: ${newQuality}`, {
-        description: 'MPEG-TS utilise une qualité fixe'
-      });
+    } else if (playerTypeRef.current === 'mpegts' && mpegtsRef.current) {
+      // MPEG-TS: ajuster la stratégie de buffering selon la qualité demandée
+      const video = videoRef.current;
+      if (!video) return;
+      
+      try {
+        const player = mpegtsRef.current;
+        const currentTime = video.currentTime;
+        const wasPlaying = !video.paused;
+        
+        // Recréer le player avec des paramètres adaptés à la qualité
+        player.pause();
+        player.unload();
+        
+        // Configuration adaptée selon la qualité
+        let config = {
+          type: 'mpegts',
+          isLive: true,
+          url: useProxyRef.current ? getProxiedUrl(streamUrl) : streamUrl,
+          cors: true,
+          withCredentials: false
+        };
+        
+        let options: any = {
+          enableWorker: true,
+          enableStashBuffer: true,
+          autoCleanupSourceBuffer: true,
+          liveBufferLatencyChasing: false,
+          fixAudioTimestampGap: true,
+          lazyLoad: false,
+          deferLoadAfterSourceOpen: false,
+          accurateSeek: false,
+          seekType: 'range',
+          isLive: true,
+          reuseRedirectedURL: true
+        };
+        
+        // Ajuster les buffers selon la qualité
+        if (newQuality === 'low') {
+          // Basse qualité : buffers minimaux pour stabilité maximale
+          options.stashInitialSize = 2 * 1024 * 1024; // 2MB
+          options.autoCleanupMaxBackwardDuration = 40;
+          options.autoCleanupMinBackwardDuration = 20;
+          options.liveBufferLatencyMaxLatency = 10;
+          options.liveBufferLatencyMinRemain = 4;
+          toast.success('💾 Qualité basse', {
+            description: 'Stabilité maximale, latence réduite'
+          });
+        } else if (newQuality === 'medium') {
+          // Qualité moyenne : équilibre
+          options.stashInitialSize = 3 * 1024 * 1024; // 3MB
+          options.autoCleanupMaxBackwardDuration = 50;
+          options.autoCleanupMinBackwardDuration = 25;
+          options.liveBufferLatencyMaxLatency = 12;
+          options.liveBufferLatencyMinRemain = 5;
+          toast.success('📺 Qualité moyenne', {
+            description: 'Équilibre stabilité/qualité'
+          });
+        } else if (newQuality === 'high') {
+          // Haute qualité : buffers larges
+          options.stashInitialSize = 5 * 1024 * 1024; // 5MB
+          options.autoCleanupMaxBackwardDuration = 70;
+          options.autoCleanupMinBackwardDuration = 35;
+          options.liveBufferLatencyMaxLatency = 18;
+          options.liveBufferLatencyMinRemain = 7;
+          toast.success('🎯 Qualité haute', {
+            description: 'Meilleure qualité, buffers augmentés'
+          });
+        } else {
+          // Auto : adaptatif selon le réseau
+          const speed = getNetworkSpeed();
+          if (speed === 'fast') {
+            options.stashInitialSize = 4 * 1024 * 1024;
+            options.autoCleanupMaxBackwardDuration = 60;
+            options.autoCleanupMinBackwardDuration = 30;
+            options.liveBufferLatencyMaxLatency = 15;
+            options.liveBufferLatencyMinRemain = 6;
+          } else if (speed === 'medium') {
+            options.stashInitialSize = 3 * 1024 * 1024;
+            options.autoCleanupMaxBackwardDuration = 50;
+            options.autoCleanupMinBackwardDuration = 25;
+            options.liveBufferLatencyMaxLatency = 12;
+            options.liveBufferLatencyMinRemain = 5;
+          } else {
+            options.stashInitialSize = 2 * 1024 * 1024;
+            options.autoCleanupMaxBackwardDuration = 40;
+            options.autoCleanupMinBackwardDuration = 20;
+            options.liveBufferLatencyMaxLatency = 10;
+            options.liveBufferLatencyMinRemain = 4;
+          }
+          toast.success('⚡ Mode adaptatif', {
+            description: `Optimisé pour ${speed === 'fast' ? '4G/5G' : speed === 'medium' ? '3G' : '2G'}`
+          });
+        }
+        
+        // Créer nouveau player avec nouvelle config
+        const newPlayer = mpegts.createPlayer(config, options);
+        
+        // Copier les event handlers
+        newPlayer.on(mpegts.Events.ERROR, (errorType: string, errorDetail: any) => {
+          console.error('🔴 MPEGTS Error après changement qualité:', errorType, errorDetail);
+          if (!useProxyRef.current && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
+            useProxyRef.current = true;
+            cleanup();
+            scheduleRetry(() => createMpegtsPlayer());
+          } else {
+            cleanup();
+            scheduleRetry(() => createMpegtsPlayer());
+          }
+        });
+        
+        newPlayer.attachMediaElement(video);
+        newPlayer.load();
+        
+        // Restaurer l'état
+        if (currentTime > 0) {
+          video.currentTime = currentTime;
+        }
+        if (wasPlaying) {
+          setTimeout(() => {
+            video.play().catch(() => {});
+          }, 200);
+        }
+        
+        mpegtsRef.current = newPlayer;
+        
+      } catch (error) {
+        console.error('Erreur changement qualité MPEG-TS:', error);
+        toast.error('Erreur changement qualité', {
+          description: 'Le flux va être rechargé'
+        });
+        cleanup();
+        setTimeout(() => createMpegtsPlayer(), 500);
+      }
     }
-  }, [availableQualities]);
+  }, [availableQualities, streamUrl, cleanup, scheduleRetry, createMpegtsPlayer]);
 
   // Double-tap seek
   const handleVideoClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -1055,7 +1266,15 @@ export const VideoPlayerHybrid = ({
   };
   const currentQualityLabel = playerTypeRef.current === 'hls' && currentLevel >= 0 ? availableQualities[currentLevel]?.label || 'Auto' : 'Live';
   return <div ref={containerRef} className="relative w-full aspect-video bg-black rounded-lg overflow-hidden shadow-2xl" onMouseMove={handleMouseMove} onMouseLeave={() => isPlaying && !showSettings && setShowControls(false)} onClick={handleVideoClick}>
-      <video ref={videoRef} className="absolute inset-0 w-full h-full" playsInline preload="auto" />
+      <video 
+        ref={videoRef} 
+        className="absolute inset-0 w-full h-full" 
+        playsInline 
+        preload="auto"
+        webkit-playsinline="true"
+        x-webkit-airplay="allow"
+        controlsList="nodownload"
+      />
 
       {/* Quality indicator */}
       {!isLoading && !errorMessage && videoMetrics.resolution !== 'N/A'}
