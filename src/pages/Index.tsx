@@ -2,8 +2,10 @@ import { useState } from "react";
 import { VideoPlayerHybrid as VideoPlayer } from "@/components/VideoPlayerHybrid";
 import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { Video, Tv } from "lucide-react";
+import { Video, Tv, Link as LinkIcon, Play } from "lucide-react";
 const PREDEFINED_CHANNELS = [{
   name: "Eurosport 1 FHD",
   url: "http://drmv3-m6.info:80/play/live.php?mac=00:1A:79:84:1A:60&stream=250665&extension=ts"
@@ -41,17 +43,43 @@ const PREDEFINED_CHANNELS = [{
 const Index = () => {
   const [streamUrl, setStreamUrl] = useState("");
   const [selectedChannel, setSelectedChannel] = useState("");
+  const [customUrl, setCustomUrl] = useState("");
   
   const handleChannelSelect = (channelName: string) => {
     const channel = PREDEFINED_CHANNELS.find(ch => ch.name === channelName);
     if (channel) {
       setSelectedChannel(channelName);
       setStreamUrl(channel.url);
+      setCustomUrl(""); // Clear custom URL when selecting from list
       toast.success(`📺 Chargement de ${channel.name}`, {
         description: "Le flux sera prêt dans quelques instants",
         duration: 3000,
       });
     }
+  };
+
+  const handleCustomUrlSubmit = () => {
+    if (!customUrl.trim()) {
+      toast.error("URL vide", {
+        description: "Veuillez entrer une URL valide"
+      });
+      return;
+    }
+
+    // Basic validation
+    if (!customUrl.startsWith('http://') && !customUrl.startsWith('https://')) {
+      toast.error("URL invalide", {
+        description: "L'URL doit commencer par http:// ou https://"
+      });
+      return;
+    }
+
+    setStreamUrl(customUrl);
+    setSelectedChannel(""); // Clear channel selection
+    toast.success("🔗 Chargement du flux personnalisé", {
+      description: "Connexion en cours...",
+      duration: 3000,
+    });
   };
   return <div className="min-h-screen bg-background p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-8">
@@ -81,6 +109,46 @@ const Index = () => {
                     </SelectItem>)}
                 </SelectContent>
               </Select>
+            </div>
+
+            {/* Divider */}
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t border-border" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-card px-2 text-muted-foreground">ou</span>
+              </div>
+            </div>
+
+            {/* Custom URL Input */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground flex items-center gap-2">
+                <LinkIcon className="w-4 h-4 text-primary" />
+                URL personnalisée (HLS/MPEG-TS)
+              </label>
+              <div className="flex gap-2">
+                <Input
+                  type="text"
+                  value={customUrl}
+                  onChange={(e) => setCustomUrl(e.target.value)}
+                  placeholder="https://exemple.com/stream.m3u8"
+                  className="flex-1 bg-input border-border text-foreground"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      handleCustomUrlSubmit();
+                    }
+                  }}
+                />
+                <Button
+                  onClick={handleCustomUrlSubmit}
+                  className="bg-primary hover:bg-primary/90"
+                  disabled={!customUrl.trim()}
+                >
+                  <Play className="w-4 h-4 mr-2" />
+                  Lire
+                </Button>
+              </div>
             </div>
 
             <p className="text-xs text-muted-foreground">

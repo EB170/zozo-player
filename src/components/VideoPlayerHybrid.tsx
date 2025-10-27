@@ -408,20 +408,20 @@ export const VideoPlayerHybrid = ({
     }
     console.log('🎬 Creating HLS player...');
 
-    // Configuration optimisée pour stabilité maximale en production
+    // ========== CONFIGURATION HLS ULTRA-STABLE (best practices CDN/ABR) ==========
     const hls = new Hls({
       debug: hlsDebugMode.current,
       enableWorker: true,
       
-      // ========== BUFFER OPTIMISÉ STABILITÉ EXTRÊME ==========
-      maxBufferLength: 60,              // 60s pour maximum stabilité long-terme
-      maxMaxBufferLength: 90,           // Cap à 90s (augmenté)
-      maxBufferSize: 70 * 1000 * 1000,  // 70MB (augmenté pour éviter underrun)
-      maxBufferHole: 0.3,               // Tolérance réduite à 300ms pour meilleure continuité
+      // ========== BUFFER: maximisé pour zéro saccade ==========
+      maxBufferLength: 90,              // 90s buffer forward (très large)
+      maxMaxBufferLength: 120,          // Cap 120s (tolérance maximale)
+      maxBufferSize: 100 * 1000 * 1000, // 100MB (évite tout underrun)
+      maxBufferHole: 0.2,               // 200ms tolérance gaps
       
-      // ========== LIVE SYNC - Optimisé stabilité ==========
-      liveSyncDurationCount: 4,         // 4 fragments (augmenté pour marge)
-      liveMaxLatencyDurationCount: 10,  // Max 10 segments (plus tolérant)
+      // ========== LIVE SYNC: latence vs stabilité ==========
+      liveSyncDurationCount: 5,         // 5 segments du live (marge confortable)
+      liveMaxLatencyDurationCount: 12,  // Max 12 segments retard (très tolérant)
       liveDurationInfinity: false,
       
       // ========== BACK BUFFER (NETTOYAGE AUTO) ==========
