@@ -106,19 +106,29 @@ export const VideoPlayerHybrid = ({
 
   // Cleanup complet
   const cleanup = useCallback(() => {
+    console.log("[VideoPlayerHybrid] Cleanup - FULL DESTRUCTION");
     const video = videoRef.current;
     
-    // Pause et reset vidéo pour éviter overlaps
+    // Stop and cleanup ad
+    if (adVideoRef.current) {
+      adVideoRef.current.pause();
+      adVideoRef.current.src = '';
+      adVideoRef.current.load();
+    }
+    setAdPlaying(false);
+    setAdSkippable(false);
+    setAdTimeRemaining(0);
+    
+    if (adCountdownIntervalRef.current) {
+      clearInterval(adCountdownIntervalRef.current);
+      adCountdownIntervalRef.current = null;
+    }
+    
+    // Pause et reset vidéo principale
     if (video) {
       video.pause();
       video.removeAttribute('src');
       video.load();
-    }
-    
-    // Cleanup ad countdown
-    if (adCountdownIntervalRef.current) {
-      clearInterval(adCountdownIntervalRef.current);
-      adCountdownIntervalRef.current = null;
     }
 
     if (retryTimeoutRef.current) {
@@ -426,46 +436,47 @@ export const VideoPlayerHybrid = ({
     // ========================================================================
     const hls = new Hls({
       debug: hlsDebugMode.current,
-      enableWorker: true,  // CRITIQUE: Parsing TS dans Web Worker (libère main thread)
+      enableWorker: true,
+      lowLatencyMode: true, // ✅ CRITICAL: Activer low latency pour fluidité maximale
       
-      // ========== 1. STRATÉGIE DE BUFFERING (ZÉRO COUPURE) ==========
-      // Concept : "Fenêtre glissante" large + tolérance maximale aux variations réseau
+      // ========== 1. BUFFER STRATEGY: RÉDUIT pour FLUIDITÉ MAXIMALE ==========
+      // Priorité absolue: ZÉRO BUFFERING au détriment de la qualité
       
-      // BUFFER FORWARD (combien précharger en avance)
-      maxBufferLength: 120,              // 120s buffer (2 min) - Netflix-level pour live stable
-      maxMaxBufferLength: 180,           // Cap absolu 3min (sécurité extrême)
-      maxBufferSize: 150 * 1000 * 1000,  // 150MB max (évite OOM sur mobiles tout en gardant marge)
-      maxBufferHole: 0.15,               // Tolérance 150ms pour gaps/discontinuités (très strict)
+      // BUFFER FORWARD (réduit drastiquement pour réactivité maximale)
+      maxBufferLength: 20,               // ✅ 20s buffer (réduit de 120s) - Réaction ultra-rapide
+      maxMaxBufferLength: 30,            // ✅ 30s cap absolu (réduit de 180s)
+      maxBufferSize: 30 * 1000 * 1000,   // ✅ 30MB max (réduit de 150MB) - Économie mémoire
+      maxBufferHole: 0.5,                // ✅ 500ms tolérance (augmenté pour sauter les trous)
       
-      // BUFFER BACKWARD (combien garder en arrière)
-      backBufferLength: 10,              // 10s historique (permet seek arrière rapide sans re-fetch)
+      // BUFFER BACKWARD (minimal)
+      backBufferLength: 5,               // ✅ 5s historique minimum (réduit de 10s)
       
-      // ========== 2. LIVE SYNC OPTIMISÉ (Latence vs Stabilité) ==========
-      // Concept : Se positionner à N segments du bord live, avec marge de rattrapage
+      // ========== 2. LIVE SYNC: ULTRA-LOW LATENCY ==========
+      // Concept: Coller au live edge, quitte à perdre en qualité
       
       // LIVE EDGE TARGETING (pour flux en direct)
-      liveSyncDurationCount: 4,          // Position cible : 4 segments du bord (ex: 4*6s = 24s latence)
-      liveMaxLatencyDurationCount: 10,   // Déclenche rattrapage si >10 segments de retard (60s max)
+      liveSyncDurationCount: 2,          // ✅ 2 segments du live (réduit de 4) - Latence ultra-basse
+      liveMaxLatencyDurationCount: 4,    // ✅ 4 segments max (réduit de 10) - Rattrapage rapide
       liveDurationInfinity: false,
-      maxLiveSyncPlaybackRate: 1.08,     // Rattrapage progressif à 108% (imperceptible mais efficace)
+      maxLiveSyncPlaybackRate: 1.15,     // ✅ 115% speed (augmenté) - Rattrapage agressif
       
-      // ========== 3. ADAPTIVE BITRATE (ABR) ULTRA-STABLE ==========
-      // Concept : EWMA (Exponential Weighted Moving Average) pour lisser estimation BP
+      // ========== 3. ABR: AGRESSIF pour BASSES QUALITÉS ==========
+      // Concept: Descendre vite en qualité pour éviter buffering
       
-      // EWMA WEIGHTS (contrôle réactivité vs stabilité)
-      abrEwmaFastLive: 2.0,              // Fenêtre rapide 2s (réagit vite aux drops)
-      abrEwmaSlowLive: 12.0,             // Fenêtre lente 12s (lisse les variations, TRÈS stable)
-      abrEwmaDefaultEstimate: 500000,    // Estimation initiale 500kbps (conservative start)
+      // EWMA WEIGHTS (réaction ultra-rapide)
+      abrEwmaFastLive: 1.0,              // ✅ Réaction ultra-rapide (réduit de 2.0)
+      abrEwmaSlowLive: 5.0,              // ✅ Lissage rapide (réduit de 12.0)
+      abrEwmaDefaultEstimate: 200000,    // ✅ 200 kbps initial (réduit de 500k) - Démarrage bas
       
-      // BANDWIDTH SAFETY MARGINS (marges de sécurité pour switches)
-      abrBandWidthFactor: 0.90,          // Downswitch à 90% BP estimée (conservateur, évite buffering)
-      abrBandWidthUpFactor: 0.65,        // Upswitch seulement à 65% (TRÈS conservateur, évite saccades)
-      abrMaxWithRealBitrate: true,       // Utilise bitrate réel des segments (pas juste manifest)
-      minAutoBitrate: 0,                 // Pas de plancher (permet qualité minimale en 3G)
+      // BANDWIDTH SAFETY MARGINS (favorise basses qualités)
+      abrBandWidthFactor: 0.70,          // ✅ 70% marge (plus conservateur) = favorise basses qualités
+      abrBandWidthUpFactor: 0.80,        // ✅ 80% pour upscale (plus conservateur)
+      abrMaxWithRealBitrate: true,       // Utilise bitrate réel des segments
+      minAutoBitrate: 0,                 // Pas de plancher (permet qualité minimale)
       
-      // START LEVEL (qualité de démarrage)
-      startLevel: -1,                    // -1 = auto-detect via testBandwidth (meilleur compromis)
-      testBandwidth: true,               // Mesure BP réelle avant de commencer (évite mauvais démarrage)
+      // START LEVEL (démarrer bas)
+      startLevel: -1,                    // ✅ Démarrer au niveau le plus bas automatiquement
+      testBandwidth: true,               // Mesure BP réelle avant de commencer
       
       // ========== 4. RETRY POLICIES (Gestion Réseau Instable) ==========
       // Concept : Backoff exponentiel + timeouts progressifs pour chaque type de ressource
@@ -508,7 +519,7 @@ export const VideoPlayerHybrid = ({
       maxFragLookUpTolerance: 0.15,      // Tolérance 150ms pour trouver fragment (strict)
       
       // PERFORMANCE LIVE
-      lowLatencyMode: false,             // DÉSACTIVÉ pour priorité stabilité (LL-HLS = moins stable)
+      // lowLatencyMode: true (déjà défini en haut)
       
       // PRÉCHARGEMENT
       autoStartLoad: true,               // Démarrer chargement dès attachMedia
@@ -1100,16 +1111,17 @@ export const VideoPlayerHybrid = ({
   }, [streamUrl, cleanup, createHlsPlayer, createMpegtsPlayer]);
 
   // Jouer publicité VAST avant le flux principal
+  // ✅ MONÉTISATION MAXIMALE: Pub VAST à chaque changement de chaîne
   const playVastAd = useCallback(async () => {
     const adVideo = adVideoRef.current;
-    if (!adVideo || hasPlayedAdRef.current) {
+    if (!adVideo) {
       initPlayer();
       return;
     }
 
     setIsLoading(true);
     setAdPlaying(true);
-    console.log('🎬 Loading VAST ad...');
+    console.log('🎬 Loading VAST ad (new channel)...');
 
     try {
       const vastClient = new VASTClient();
@@ -1165,7 +1177,6 @@ export const VideoPlayerHybrid = ({
           clearInterval(adCountdownIntervalRef.current);
           adCountdownIntervalRef.current = null;
         }
-        hasPlayedAdRef.current = true;
         setAdPlaying(false);
         setIsLoading(false);
         initPlayer();
@@ -1177,7 +1188,6 @@ export const VideoPlayerHybrid = ({
           clearInterval(adCountdownIntervalRef.current);
           adCountdownIntervalRef.current = null;
         }
-        hasPlayedAdRef.current = true;
         setAdPlaying(false);
         setIsLoading(false);
         initPlayer();
@@ -1198,7 +1208,6 @@ export const VideoPlayerHybrid = ({
 
     } catch (error) {
       console.error('VAST ad error:', error);
-      hasPlayedAdRef.current = true;
       setAdPlaying(false);
       setIsLoading(false);
       initPlayer();
@@ -1219,7 +1228,6 @@ export const VideoPlayerHybrid = ({
       adCountdownIntervalRef.current = null;
     }
     
-    hasPlayedAdRef.current = true;
     setAdPlaying(false);
     initPlayer();
   }, [adSkippable, initPlayer]);
@@ -1271,36 +1279,25 @@ export const VideoPlayerHybrid = ({
     };
   }, []);
 
-  // Init on mount + swap optimisé sur changement URL
+  // ✅ CRUCIAL: Init + Pub VAST à CHAQUE changement de chaîne
   useEffect(() => {
-    const isFirstMount = !hlsRef.current && !mpegtsRef.current;
+    if (!videoRef.current || !streamUrl) return;
     
-    if (isFirstMount) {
-      // Premier mount : jouer la pub d'abord si pas encore vue
-      uptimeStartRef.current = Date.now();
-      lastMemoryCleanupRef.current = Date.now();
-      playbackQualityCheckRef.current = 0;
-      
-      if (!hasPlayedAdRef.current) {
-        playVastAd();
-      } else {
-        initPlayer();
-      }
-    } else {
-      // Changement URL : utiliser swap optimisé pour HLS
-      const currentType = playerTypeRef.current;
-      const newType = detectStreamType(streamUrl);
-      
-      if (currentType === 'hls' && newType === 'hls') {
-        swapStream(streamUrl);
-      } else {
-        // Type différent : full recreate
-        initPlayer();
-      }
-    }
+    console.log('[VideoPlayerHybrid] Stream changed, showing ad first...', { streamUrl });
     
-    return cleanup;
-  }, [streamUrl, initPlayer, cleanup, swapStream, playVastAd]);
+    // Reset uptime trackers
+    uptimeStartRef.current = Date.now();
+    lastMemoryCleanupRef.current = Date.now();
+    playbackQualityCheckRef.current = 0;
+    
+    // ✅ MONÉTISATION: TOUJOURS jouer une pub avant chaque nouveau flux
+    playVastAd();
+    
+    return () => {
+      console.log('[VideoPlayerHybrid] Effect cleanup on unmount/stream change');
+      cleanup();
+    };
+  }, [streamUrl, playVastAd, cleanup]);
 
   // Volume & playback rate
   useEffect(() => {
@@ -1657,12 +1654,22 @@ export const VideoPlayerHybrid = ({
   };
   const currentQualityLabel = playerTypeRef.current === 'hls' && currentLevel >= 0 ? availableQualities[currentLevel]?.label || 'Auto' : 'Live';
   return <div ref={containerRef} className="relative w-full aspect-video bg-black rounded-lg overflow-hidden shadow-2xl" onMouseMove={handleMouseMove} onMouseLeave={() => isPlaying && !showSettings && setShowControls(false)} onClick={handleVideoClick}>
-      {/* Ad Video Element */}
+      {/* Ad Video Element - MOBILE OPTIMIZED */}
       <video 
         ref={adVideoRef}
-        className={`absolute inset-0 w-full h-full z-50 ${adPlaying ? 'block' : 'hidden'}`}
+        className={`absolute inset-0 w-full h-full object-contain bg-black z-50 ${adPlaying ? 'block' : 'hidden'}`}
         playsInline
+        autoPlay
+        muted={false}
         preload="auto"
+        webkit-playsinline="true"
+        x5-playsinline="true"
+        style={{
+          width: '100%',
+          height: '100%',
+          maxWidth: '100vw',
+          maxHeight: '100vh'
+        }}
       />
 
       {/* Main Video Element */}
@@ -1676,21 +1683,30 @@ export const VideoPlayerHybrid = ({
         controlsList="nodownload"
       />
 
-      {/* Ad Overlay */}
+      {/* Ad Overlay - MOBILE OPTIMIZED */}
       {adPlaying && (
-        <div className="absolute top-4 left-4 right-4 z-50 flex items-center justify-between">
-          <div className="bg-black/70 backdrop-blur-sm px-3 py-1.5 rounded-full text-white text-sm font-medium">
-            Publicité • {adTimeRemaining}s
+        <div className="absolute inset-0 z-50 pointer-events-none">
+          {/* Ad info top left */}
+          <div className="absolute top-2 left-2 md:top-4 md:left-4 bg-black/80 backdrop-blur-sm px-2 py-1 md:px-3 md:py-1.5 rounded-md">
+            <p className="text-white text-xs md:text-sm font-medium">Publicité</p>
           </div>
+          
+          {/* Countdown top right */}
+          <div className="absolute top-2 right-2 md:top-4 md:right-4 bg-black/80 backdrop-blur-sm px-2 py-1 md:px-3 md:py-1.5 rounded-md">
+            <p className="text-white text-xs md:text-sm tabular-nums">{adTimeRemaining}s</p>
+          </div>
+          
+          {/* Skip button - mobile friendly */}
           {adSkippable && (
-            <Button
-              onClick={skipAd}
-              variant="secondary"
-              size="sm"
-              className="bg-white/90 hover:bg-white text-black font-semibold"
-            >
-              Passer la pub
-            </Button>
+            <div className="absolute bottom-16 md:bottom-20 right-2 md:right-4 pointer-events-auto">
+              <button
+                onClick={skipAd}
+                className="bg-white/95 hover:bg-white active:scale-95 text-black font-semibold px-3 py-2 md:px-4 md:py-2.5 rounded-md transition-all shadow-lg text-sm md:text-base touch-manipulation"
+                style={{ minHeight: '44px', minWidth: '120px' }}
+              >
+                Passer la pub →
+              </button>
+            </div>
           )}
         </div>
       )}
