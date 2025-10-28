@@ -12,6 +12,7 @@ import { useVideoMetrics } from "@/hooks/useVideoMetrics";
 import { useHealthMonitor } from "@/hooks/useHealthMonitor";
 import { parseHLSManifest, StreamQuality } from "@/utils/manifestParser";
 import { toast } from "sonner";
+import { VASTClient } from '@dailymotion/vast-client';
 interface VideoPlayerProps {
   streamUrl: string;
   autoPlay?: boolean;
@@ -53,6 +54,7 @@ export const VideoPlayerHybrid = ({
 }: VideoPlayerProps) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const adVideoRef = useRef<HTMLVideoElement>(null);
   const mpegtsRef = useRef<any>(null);
   const hlsRef = useRef<Hls | null>(null);
   const retryCountRef = useRef(0);
@@ -63,11 +65,13 @@ export const VideoPlayerHybrid = ({
   const useProxyRef = useRef(false);
   const fragErrorCountRef = useRef(0);
   const isTransitioningRef = useRef(false);
-  const hlsDebugMode = useRef(false); // Toggle pour debug HLS
+  const hlsDebugMode = useRef(false);
   const memoryCleanupIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const uptimeStartRef = useRef<number>(Date.now());
   const lastMemoryCleanupRef = useRef<number>(Date.now());
   const playbackQualityCheckRef = useRef<number>(0);
+  const adCountdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const hasPlayedAdRef = useRef(false);
   
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -89,6 +93,9 @@ export const VideoPlayerHybrid = ({
   const [availableQualities, setAvailableQualities] = useState<StreamQuality[]>([]);
   const [currentLevel, setCurrentLevel] = useState(-1);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [adPlaying, setAdPlaying] = useState(false);
+  const [adTimeRemaining, setAdTimeRemaining] = useState(0);
+  const [adSkippable, setAdSkippable] = useState(false);
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout>();
   const videoMetrics = useVideoMetrics(videoRef.current);
   const realBandwidth = useRealBandwidth();
@@ -106,6 +113,12 @@ export const VideoPlayerHybrid = ({
       video.pause();
       video.removeAttribute('src');
       video.load();
+    }
+    
+    // Cleanup ad countdown
+    if (adCountdownIntervalRef.current) {
+      clearInterval(adCountdownIntervalRef.current);
+      adCountdownIntervalRef.current = null;
     }
 
     if (retryTimeoutRef.current) {
@@ -1086,6 +1099,131 @@ export const VideoPlayerHybrid = ({
     }, 150);
   }, [streamUrl, cleanup, createHlsPlayer, createMpegtsPlayer]);
 
+  // Jouer publicité VAST avant le flux principal
+  const playVastAd = useCallback(async () => {
+    const adVideo = adVideoRef.current;
+    if (!adVideo || hasPlayedAdRef.current) {
+      initPlayer();
+      return;
+    }
+
+    setIsLoading(true);
+    setAdPlaying(true);
+    console.log('🎬 Loading VAST ad...');
+
+    try {
+      const vastClient = new VASTClient();
+      const vastUrl = 'https://frail-benefit.com/dcmuFBz.daGiNHvGZXGuUf/Leym/9DuQZcUKlzk_PBTiYN2nO/D_g/x/OwTqYptQN/jrYC4bOWDEEe5hNKww';
+      
+      const response = await vastClient.get(vastUrl);
+      const ad = response.ads[0];
+      
+      if (!ad || !ad.creatives || ad.creatives.length === 0) {
+        console.warn('No VAST ad found, skipping to content');
+        hasPlayedAdRef.current = true;
+        setAdPlaying(false);
+        initPlayer();
+        return;
+      }
+
+      const creative = ad.creatives.find((c: any) => c.type === 'linear');
+      if (!creative || !creative.mediaFiles || creative.mediaFiles.length === 0) {
+        console.warn('No linear creative found, skipping to content');
+        hasPlayedAdRef.current = true;
+        setAdPlaying(false);
+        initPlayer();
+        return;
+      }
+
+      const mediaFile = creative.mediaFiles[0];
+      adVideo.src = mediaFile.fileURL;
+      adVideo.volume = volume;
+      adVideo.muted = isMuted;
+
+      const adDuration = creative.duration || 0;
+      const skipDelay = creative.skipDelay || 5;
+      
+      setAdTimeRemaining(Math.ceil(adDuration));
+      setAdSkippable(false);
+
+      // Countdown timer
+      const startTime = Date.now();
+      adCountdownIntervalRef.current = setInterval(() => {
+        const elapsed = (Date.now() - startTime) / 1000;
+        const remaining = Math.ceil(adDuration - elapsed);
+        setAdTimeRemaining(Math.max(0, remaining));
+        
+        if (elapsed >= skipDelay) {
+          setAdSkippable(true);
+        }
+      }, 100);
+
+      // Event handlers
+      const handleAdEnded = () => {
+        console.log('✅ Ad completed');
+        if (adCountdownIntervalRef.current) {
+          clearInterval(adCountdownIntervalRef.current);
+          adCountdownIntervalRef.current = null;
+        }
+        hasPlayedAdRef.current = true;
+        setAdPlaying(false);
+        setIsLoading(false);
+        initPlayer();
+      };
+
+      const handleAdError = () => {
+        console.warn('⚠️ Ad error, skipping to content');
+        if (adCountdownIntervalRef.current) {
+          clearInterval(adCountdownIntervalRef.current);
+          adCountdownIntervalRef.current = null;
+        }
+        hasPlayedAdRef.current = true;
+        setAdPlaying(false);
+        setIsLoading(false);
+        initPlayer();
+      };
+
+      adVideo.addEventListener('ended', handleAdEnded);
+      adVideo.addEventListener('error', handleAdError);
+
+      await adVideo.play();
+      setIsLoading(false);
+      
+      // Track impressions
+      if (ad.impressionURLTemplates) {
+        ad.impressionURLTemplates.forEach((url: string) => {
+          fetch(url).catch(() => {});
+        });
+      }
+
+    } catch (error) {
+      console.error('VAST ad error:', error);
+      hasPlayedAdRef.current = true;
+      setAdPlaying(false);
+      setIsLoading(false);
+      initPlayer();
+    }
+  }, [initPlayer, volume, isMuted]);
+
+  const skipAd = useCallback(() => {
+    if (!adSkippable) return;
+    
+    const adVideo = adVideoRef.current;
+    if (adVideo) {
+      adVideo.pause();
+      adVideo.src = '';
+    }
+    
+    if (adCountdownIntervalRef.current) {
+      clearInterval(adCountdownIntervalRef.current);
+      adCountdownIntervalRef.current = null;
+    }
+    
+    hasPlayedAdRef.current = true;
+    setAdPlaying(false);
+    initPlayer();
+  }, [adSkippable, initPlayer]);
+
   // Buffer health monitoring
   useEffect(() => {
     if (!videoRef.current) return;
@@ -1138,11 +1276,16 @@ export const VideoPlayerHybrid = ({
     const isFirstMount = !hlsRef.current && !mpegtsRef.current;
     
     if (isFirstMount) {
-      // Premier mount : init normale + reset uptime
+      // Premier mount : jouer la pub d'abord si pas encore vue
       uptimeStartRef.current = Date.now();
       lastMemoryCleanupRef.current = Date.now();
       playbackQualityCheckRef.current = 0;
-      initPlayer();
+      
+      if (!hasPlayedAdRef.current) {
+        playVastAd();
+      } else {
+        initPlayer();
+      }
     } else {
       // Changement URL : utiliser swap optimisé pour HLS
       const currentType = playerTypeRef.current;
@@ -1157,7 +1300,7 @@ export const VideoPlayerHybrid = ({
     }
     
     return cleanup;
-  }, [streamUrl, initPlayer, cleanup, swapStream]);
+  }, [streamUrl, initPlayer, cleanup, swapStream, playVastAd]);
 
   // Volume & playback rate
   useEffect(() => {
@@ -1514,15 +1657,43 @@ export const VideoPlayerHybrid = ({
   };
   const currentQualityLabel = playerTypeRef.current === 'hls' && currentLevel >= 0 ? availableQualities[currentLevel]?.label || 'Auto' : 'Live';
   return <div ref={containerRef} className="relative w-full aspect-video bg-black rounded-lg overflow-hidden shadow-2xl" onMouseMove={handleMouseMove} onMouseLeave={() => isPlaying && !showSettings && setShowControls(false)} onClick={handleVideoClick}>
+      {/* Ad Video Element */}
+      <video 
+        ref={adVideoRef}
+        className={`absolute inset-0 w-full h-full z-50 ${adPlaying ? 'block' : 'hidden'}`}
+        playsInline
+        preload="auto"
+      />
+
+      {/* Main Video Element */}
       <video 
         ref={videoRef} 
-        className="absolute inset-0 w-full h-full" 
+        className={`absolute inset-0 w-full h-full ${adPlaying ? 'hidden' : 'block'}`}
         playsInline 
         preload="auto"
         webkit-playsinline="true"
         x-webkit-airplay="allow"
         controlsList="nodownload"
       />
+
+      {/* Ad Overlay */}
+      {adPlaying && (
+        <div className="absolute top-4 left-4 right-4 z-50 flex items-center justify-between">
+          <div className="bg-black/70 backdrop-blur-sm px-3 py-1.5 rounded-full text-white text-sm font-medium">
+            Publicité • {adTimeRemaining}s
+          </div>
+          {adSkippable && (
+            <Button
+              onClick={skipAd}
+              variant="secondary"
+              size="sm"
+              className="bg-white/90 hover:bg-white text-black font-semibold"
+            >
+              Passer la pub
+            </Button>
+          )}
+        </div>
+      )}
 
       {/* Quality indicator */}
       {!isLoading && !errorMessage && videoMetrics.resolution !== 'N/A'}
