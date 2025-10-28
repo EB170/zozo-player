@@ -48,6 +48,15 @@ const getNetworkSpeed = (): 'fast' | 'medium' | 'slow' => {
   }
   return 'fast';
 };
+
+// Détection iOS/Safari pour gestion spéciale VAST
+const isIOS = (): boolean => {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+};
+
+const isSafari = (): boolean => {
+  return /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+};
 export const VideoPlayerHybrid = ({
   streamUrl,
   autoPlay = true
@@ -71,7 +80,9 @@ export const VideoPlayerHybrid = ({
   const lastMemoryCleanupRef = useRef<number>(Date.now());
   const playbackQualityCheckRef = useRef<number>(0);
   const adCountdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const hasPlayedAdRef = useRef(false);
+  const userInteractedRef = useRef(false);
+  const healthCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const maintenanceIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -106,10 +117,10 @@ export const VideoPlayerHybrid = ({
 
   // Cleanup complet
   const cleanup = useCallback(() => {
-    console.log("[VideoPlayerHybrid] Cleanup - FULL DESTRUCTION");
+    console.log("[Player] Full cleanup initiated");
     const video = videoRef.current;
     
-    // Stop and cleanup ad
+    // ═══ Cleanup Ad ═══
     if (adVideoRef.current) {
       adVideoRef.current.pause();
       adVideoRef.current.src = '';
@@ -124,25 +135,27 @@ export const VideoPlayerHybrid = ({
       adCountdownIntervalRef.current = null;
     }
     
-    // Pause et reset vidéo principale
+    // ═══ Cleanup Main Video ═══
     if (video) {
       video.pause();
       video.removeAttribute('src');
       video.load();
     }
-
-    if (retryTimeoutRef.current) {
-      clearTimeout(retryTimeoutRef.current);
-      retryTimeoutRef.current = null;
+    
+    // ═══ Cleanup Intervals ═══
+    if (healthCheckIntervalRef.current) {
+      clearInterval(healthCheckIntervalRef.current);
+      healthCheckIntervalRef.current = null;
     }
     
-    if (memoryCleanupIntervalRef.current) {
-      clearInterval(memoryCleanupIntervalRef.current);
-      memoryCleanupIntervalRef.current = null;
+    if (maintenanceIntervalRef.current) {
+      clearInterval(maintenanceIntervalRef.current);
+      maintenanceIntervalRef.current = null;
     }
     
+    // ═══ Cleanup MPEGTS Player ═══
     if (mpegtsRef.current) {
-      // Nettoyer watchdog et maintenance si existants
+      // Cleanup watchdog et maintenance
       const watchdog = (mpegtsRef.current as any)._watchdogInterval;
       if (watchdog) {
         clearInterval(watchdog);
@@ -160,17 +173,23 @@ export const VideoPlayerHybrid = ({
         mpegtsRef.current.detachMediaElement();
         mpegtsRef.current.destroy();
       } catch (e) {
-        console.warn('MPEGTS cleanup error:', e);
+        console.warn('[Player] MPEGTS cleanup warning:', e);
       }
       mpegtsRef.current = null;
     }
     
+    // ═══ Cleanup HLS Player ═══
     if (hlsRef.current) {
-      // Nettoyer maintenance interval
+      // Cleanup maintenance et live edge intervals
       const maintenance = (hlsRef.current as any)._maintenanceInterval;
       if (maintenance) {
         clearInterval(maintenance);
         (hlsRef.current as any)._maintenanceInterval = null;
+      }
+      const liveEdge = (hlsRef.current as any)._liveEdgeInterval;
+      if (liveEdge) {
+        clearInterval(liveEdge);
+        (hlsRef.current as any)._liveEdgeInterval = null;
       }
       
       try {
@@ -178,10 +197,12 @@ export const VideoPlayerHybrid = ({
         hlsRef.current.detachMedia();
         hlsRef.current.destroy();
       } catch (e) {
-        console.warn('HLS cleanup error:', e);
+        console.warn('[Player] HLS cleanup warning:', e);
       }
       hlsRef.current = null;
     }
+    
+    console.log("[Player] Cleanup completed");
   }, []);
 
   // Configuration MPEGTS optimale
@@ -237,15 +258,15 @@ export const VideoPlayerHybrid = ({
     }, {
       enableWorker: true,
       enableStashBuffer: true,
-      stashInitialSize: 5 * 1024 * 1024,      // 5MB buffer initial (augmenté pour stabilité extrême)
+      stashInitialSize: 4 * 1024 * 1024,      // 4MB initial buffer (équilibré)
       autoCleanupSourceBuffer: true,
-      autoCleanupMaxBackwardDuration: 90,     // 90s historique (augmenté)
-      autoCleanupMinBackwardDuration: 45,     // 45s minimum (augmenté)
-      liveBufferLatencyChasing: false,        // DÉSACTIVÉ pour stabilité
-      liveBufferLatencyMaxLatency: 20,        // Tolérance maximale (augmenté à 20s)
-      liveBufferLatencyMinRemain: 8,          // Garder 8s minimum (augmenté)
+      autoCleanupMaxBackwardDuration: 60,     // 60s backward (équilibré)
+      autoCleanupMinBackwardDuration: 30,     // 30s minimum
+      liveBufferLatencyChasing: false,        // Désactivé pour stabilité
+      liveBufferLatencyMaxLatency: 15,        // 15s latence max tolérée
+      liveBufferLatencyMinRemain: 6,          // Garder 6s minimum
       fixAudioTimestampGap: true,
-      lazyLoad: false,                        // Désactivé pour prefetch immédiat
+      lazyLoad: false,
       deferLoadAfterSourceOpen: false,
       accurateSeek: false,
       seekType: 'range',
@@ -434,49 +455,47 @@ export const VideoPlayerHybrid = ({
     // ========================================================================
     // CONFIGURATION HLS.JS NIVEAU PRODUCTION (Best Practices Industrie)
     // ========================================================================
+    // ════════════════════════════════════════════════════════════════════════
+    // CONFIGURATION HLS.js PROFESSIONNELLE - STRATÉGIE ÉQUILIBRÉE
+    // Basée sur les best practices de Twitch, YouTube Live, et broadcasters pro
+    // ════════════════════════════════════════════════════════════════════════
     const hls = new Hls({
       debug: hlsDebugMode.current,
-      enableWorker: true,
-      lowLatencyMode: true, // ✅ CRITICAL: Activer low latency pour fluidité maximale
+      enableWorker: true,              // Web Worker pour parsing TS (libère main thread)
+      lowLatencyMode: false,           // Désactivé: plus stable pour IPTV classique
       
-      // ========== 1. BUFFER STRATEGY: RÉDUIT pour FLUIDITÉ MAXIMALE ==========
-      // Priorité absolue: ZÉRO BUFFERING au détriment de la qualité
+      // ────────────── 1. BUFFER STRATEGY (Approche Équilibrée) ──────────────
+      // Objectif: Équilibre entre stabilité (gros buffer) et réactivité
+      // Inspiré de la config Twitch/YouTube pour live stable
       
-      // BUFFER FORWARD (réduit drastiquement pour réactivité maximale)
-      maxBufferLength: 20,               // ✅ 20s buffer (réduit de 120s) - Réaction ultra-rapide
-      maxMaxBufferLength: 30,            // ✅ 30s cap absolu (réduit de 180s)
-      maxBufferSize: 30 * 1000 * 1000,   // ✅ 30MB max (réduit de 150MB) - Économie mémoire
-      maxBufferHole: 0.5,                // ✅ 500ms tolérance (augmenté pour sauter les trous)
+      maxBufferLength: 60,             // 60s forward buffer - Sweet spot stabilité/latence
+      maxMaxBufferLength: 90,          // 90s cap absolu - Évite OOM sur mobiles
+      maxBufferSize: 80 * 1000 * 1000, // 80MB - Compromis mémoire/stabilité
+      maxBufferHole: 0.3,              // 300ms tolérance gaps - Permissif mais raisonnable
+      backBufferLength: 10,            // 10s backward - Permet seeks rapides
       
-      // BUFFER BACKWARD (minimal)
-      backBufferLength: 5,               // ✅ 5s historique minimum (réduit de 10s)
+      // ────────────── 2. LIVE SYNC (Latence Contrôlée) ──────────────
+      // Stratégie: Maintenir 3-6 segments du live edge (balance latence/stabilité)
       
-      // ========== 2. LIVE SYNC: ULTRA-LOW LATENCY ==========
-      // Concept: Coller au live edge, quitte à perdre en qualité
-      
-      // LIVE EDGE TARGETING (pour flux en direct)
-      liveSyncDurationCount: 2,          // ✅ 2 segments du live (réduit de 4) - Latence ultra-basse
-      liveMaxLatencyDurationCount: 4,    // ✅ 4 segments max (réduit de 10) - Rattrapage rapide
+      liveSyncDurationCount: 3,        // 3 segments du live (~18s avec segments 6s)
+      liveMaxLatencyDurationCount: 6,  // Max 6 segments avant rattrapage
       liveDurationInfinity: false,
-      maxLiveSyncPlaybackRate: 1.15,     // ✅ 115% speed (augmenté) - Rattrapage agressif
+      maxLiveSyncPlaybackRate: 1.05,   // 105% playback pour rattrapage doux
       
-      // ========== 3. ABR: AGRESSIF pour BASSES QUALITÉS ==========
-      // Concept: Descendre vite en qualité pour éviter buffering
+      // ────────────── 3. ABR (Adaptive Bitrate Intelligent) ──────────────
+      // Stratégie: EWMA lissé + marges conservatrices = stabilité maximale
       
-      // EWMA WEIGHTS (réaction ultra-rapide)
-      abrEwmaFastLive: 1.0,              // ✅ Réaction ultra-rapide (réduit de 2.0)
-      abrEwmaSlowLive: 5.0,              // ✅ Lissage rapide (réduit de 12.0)
-      abrEwmaDefaultEstimate: 200000,    // ✅ 200 kbps initial (réduit de 500k) - Démarrage bas
+      abrEwmaFastLive: 3.0,            // Fenêtre rapide 3s
+      abrEwmaSlowLive: 9.0,            // Fenêtre lente 9s - Lissage équilibré
+      abrEwmaDefaultEstimate: 1000000, // 1 Mbps initial - Optimiste mais safe
       
-      // BANDWIDTH SAFETY MARGINS (favorise basses qualités)
-      abrBandWidthFactor: 0.70,          // ✅ 70% marge (plus conservateur) = favorise basses qualités
-      abrBandWidthUpFactor: 0.80,        // ✅ 80% pour upscale (plus conservateur)
-      abrMaxWithRealBitrate: true,       // Utilise bitrate réel des segments
-      minAutoBitrate: 0,                 // Pas de plancher (permet qualité minimale)
+      abrBandWidthFactor: 0.85,        // 85% pour downswitch - Conservateur
+      abrBandWidthUpFactor: 0.70,      // 70% pour upswitch - Très conservateur
+      abrMaxWithRealBitrate: true,
+      minAutoBitrate: 0,
       
-      // START LEVEL (démarrer bas)
-      startLevel: -1,                    // ✅ Démarrer au niveau le plus bas automatiquement
-      testBandwidth: true,               // Mesure BP réelle avant de commencer
+      startLevel: -1,                  // Auto-detect optimal
+      testBandwidth: true,             // Mesure initiale BP
       
       // ========== 4. RETRY POLICIES (Gestion Réseau Instable) ==========
       // Concept : Backoff exponentiel + timeouts progressifs pour chaque type de ressource
@@ -1110,8 +1129,9 @@ export const VideoPlayerHybrid = ({
     }, 150);
   }, [streamUrl, cleanup, createHlsPlayer, createMpegtsPlayer]);
 
-  // Jouer publicité VAST avant le flux principal
-  // ✅ MONÉTISATION MAXIMALE: Pub VAST à chaque changement de chaîne
+  // ══════════════════════════════════════════════════════════════════════
+  // VAST AD PLAYER - iOS/Safari Compatible
+  // ══════════════════════════════════════════════════════════════════════
   const playVastAd = useCallback(async () => {
     const adVideo = adVideoRef.current;
     if (!adVideo) {
@@ -1121,7 +1141,7 @@ export const VideoPlayerHybrid = ({
 
     setIsLoading(true);
     setAdPlaying(true);
-    console.log('🎬 Loading VAST ad (new channel)...');
+    console.log('🎬 [VAST] Loading ad...', { iOS: isIOS(), Safari: isSafari() });
 
     try {
       const vastClient = new VASTClient();
@@ -1131,8 +1151,7 @@ export const VideoPlayerHybrid = ({
       const ad = response.ads[0];
       
       if (!ad || !ad.creatives || ad.creatives.length === 0) {
-        console.warn('No VAST ad found, skipping to content');
-        hasPlayedAdRef.current = true;
+        console.warn('[VAST] No ad found, proceeding to content');
         setAdPlaying(false);
         initPlayer();
         return;
@@ -1140,17 +1159,43 @@ export const VideoPlayerHybrid = ({
 
       const creative = ad.creatives.find((c: any) => c.type === 'linear');
       if (!creative || !creative.mediaFiles || creative.mediaFiles.length === 0) {
-        console.warn('No linear creative found, skipping to content');
-        hasPlayedAdRef.current = true;
+        console.warn('[VAST] No linear creative, proceeding to content');
         setAdPlaying(false);
         initPlayer();
         return;
       }
 
-      const mediaFile = creative.mediaFiles[0];
+      // Sélectionner le meilleur mediaFile (préférence MP4 pour compatibilité iOS)
+      const mediaFile = creative.mediaFiles.find((mf: any) => 
+        mf.mimeType?.includes('mp4')
+      ) || creative.mediaFiles[0];
+      
+      console.log('[VAST] Selected media:', { 
+        url: mediaFile.fileURL, 
+        type: mediaFile.mimeType 
+      });
+
+      // ═══ iOS/Safari CRITICAL: Configuration spéciale ═══
+      // Sur iOS, l'autoplay est bloqué SAUF si:
+      // 1. La vidéo est mutée OU
+      // 2. L'utilisateur a déjà interagi avec la page
+      
+      const isIOSDevice = isIOS();
+      const needsMuted = isIOSDevice && !userInteractedRef.current;
+      
+      // Préparer la vidéo
       adVideo.src = mediaFile.fileURL;
-      adVideo.volume = volume;
-      adVideo.muted = isMuted;
+      adVideo.load(); // Précharger
+      
+      // Sur iOS sans interaction: FORCER mute (sinon bloqué par Safari)
+      if (needsMuted) {
+        console.log('[VAST] iOS detected without user interaction - forcing muted');
+        adVideo.muted = true;
+        adVideo.volume = 0;
+      } else {
+        adVideo.muted = isMuted;
+        adVideo.volume = isMuted ? 0 : volume;
+      }
 
       const adDuration = creative.duration || 0;
       const skipDelay = creative.skipDelay || 5;
@@ -1172,7 +1217,7 @@ export const VideoPlayerHybrid = ({
 
       // Event handlers
       const handleAdEnded = () => {
-        console.log('✅ Ad completed');
+        console.log('[VAST] ✅ Ad completed normally');
         if (adCountdownIntervalRef.current) {
           clearInterval(adCountdownIntervalRef.current);
           adCountdownIntervalRef.current = null;
@@ -1182,8 +1227,8 @@ export const VideoPlayerHybrid = ({
         initPlayer();
       };
 
-      const handleAdError = () => {
-        console.warn('⚠️ Ad error, skipping to content');
+      const handleAdError = (e: Event) => {
+        console.warn('[VAST] ⚠️ Ad playback error, skipping to content', e);
         if (adCountdownIntervalRef.current) {
           clearInterval(adCountdownIntervalRef.current);
           adCountdownIntervalRef.current = null;
@@ -1192,22 +1237,61 @@ export const VideoPlayerHybrid = ({
         setIsLoading(false);
         initPlayer();
       };
-
-      adVideo.addEventListener('ended', handleAdEnded);
-      adVideo.addEventListener('error', handleAdError);
-
-      await adVideo.play();
-      setIsLoading(false);
       
-      // Track impressions
-      if (ad.impressionURLTemplates) {
-        ad.impressionURLTemplates.forEach((url: string) => {
-          fetch(url).catch(() => {});
-        });
+      const handleAdCanPlay = () => {
+        console.log('[VAST] Ad ready to play');
+        setIsLoading(false);
+      };
+
+      adVideo.addEventListener('ended', handleAdEnded, { once: true });
+      adVideo.addEventListener('error', handleAdError, { once: true });
+      adVideo.addEventListener('canplay', handleAdCanPlay, { once: true });
+
+      // ═══ TENTATIVE DE LECTURE ═══
+      try {
+        const playPromise = adVideo.play();
+        
+        if (playPromise !== undefined) {
+          await playPromise;
+          console.log('[VAST] ✅ Ad playback started successfully');
+          
+          // Track impressions
+          if (ad.impressionURLTemplates) {
+            ad.impressionURLTemplates.forEach((url: string) => {
+              fetch(url).catch(() => {});
+            });
+          }
+        }
+      } catch (playError: any) {
+        console.error('[VAST] Play failed:', playError);
+        
+        // Sur iOS, si play() échoue, c'est souvent un problème d'autoplay
+        if (isIOSDevice && playError.name === 'NotAllowedError') {
+          console.log('[VAST] iOS autoplay blocked - showing tap-to-play overlay');
+          // On pourrait afficher un bouton "Tap to play ad" ici
+          // Pour l'instant, on skip vers le contenu
+          toast.info("Appuyez pour lancer la pub", {
+            description: "iOS nécessite une interaction"
+          });
+        }
+        
+        // Cleanup et skip vers contenu
+        adVideo.removeEventListener('ended', handleAdEnded);
+        adVideo.removeEventListener('error', handleAdError);
+        adVideo.removeEventListener('canplay', handleAdCanPlay);
+        
+        if (adCountdownIntervalRef.current) {
+          clearInterval(adCountdownIntervalRef.current);
+          adCountdownIntervalRef.current = null;
+        }
+        
+        setAdPlaying(false);
+        setIsLoading(false);
+        initPlayer();
       }
 
     } catch (error) {
-      console.error('VAST ad error:', error);
+      console.error('[VAST] Fatal error:', error);
       setAdPlaying(false);
       setIsLoading(false);
       initPlayer();
@@ -1279,25 +1363,45 @@ export const VideoPlayerHybrid = ({
     };
   }, []);
 
-  // ✅ CRUCIAL: Init + Pub VAST à CHAQUE changement de chaîne
+  // ══════════════════════════════════════════════════════════════════════
+  // MAIN EFFECT: Stream change → Ad → Player init
+  // ══════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (!videoRef.current || !streamUrl) return;
     
-    console.log('[VideoPlayerHybrid] Stream changed, showing ad first...', { streamUrl });
+    console.log('[Player] Stream URL changed, starting ad flow', { streamUrl });
     
-    // Reset uptime trackers
+    // Reset tracking
     uptimeStartRef.current = Date.now();
     lastMemoryCleanupRef.current = Date.now();
     playbackQualityCheckRef.current = 0;
     
-    // ✅ MONÉTISATION: TOUJOURS jouer une pub avant chaque nouveau flux
+    // Play VAST ad before every new stream (monetization)
     playVastAd();
     
     return () => {
-      console.log('[VideoPlayerHybrid] Effect cleanup on unmount/stream change');
+      console.log('[Player] Cleanup on stream change/unmount');
       cleanup();
     };
   }, [streamUrl, playVastAd, cleanup]);
+  
+  // Track user interaction for iOS autoplay workaround
+  useEffect(() => {
+    const markInteraction = () => {
+      if (!userInteractedRef.current) {
+        console.log('[Player] User interaction detected');
+        userInteractedRef.current = true;
+      }
+    };
+    
+    document.addEventListener('click', markInteraction, { once: true });
+    document.addEventListener('touchstart', markInteraction, { once: true });
+    
+    return () => {
+      document.removeEventListener('click', markInteraction);
+      document.removeEventListener('touchstart', markInteraction);
+    };
+  }, []);
 
   // Volume & playback rate
   useEffect(() => {
@@ -1654,21 +1758,20 @@ export const VideoPlayerHybrid = ({
   };
   const currentQualityLabel = playerTypeRef.current === 'hls' && currentLevel >= 0 ? availableQualities[currentLevel]?.label || 'Auto' : 'Live';
   return <div ref={containerRef} className="relative w-full aspect-video bg-black rounded-lg overflow-hidden shadow-2xl" onMouseMove={handleMouseMove} onMouseLeave={() => isPlaying && !showSettings && setShowControls(false)} onClick={handleVideoClick}>
-      {/* Ad Video Element - MOBILE OPTIMIZED */}
+      {/* ═══ VAST Ad Video Element ═══ */}
       <video 
         ref={adVideoRef}
         className={`absolute inset-0 w-full h-full object-contain bg-black z-50 ${adPlaying ? 'block' : 'hidden'}`}
         playsInline
-        autoPlay
-        muted={false}
         preload="auto"
         webkit-playsinline="true"
+        x-webkit-airplay="allow"
         x5-playsinline="true"
+        x5-video-player-type="h5"
+        x5-video-player-fullscreen="true"
         style={{
           width: '100%',
-          height: '100%',
-          maxWidth: '100vw',
-          maxHeight: '100vh'
+          height: '100%'
         }}
       />
 
