@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { VideoPlayerHybrid as VideoPlayer } from "@/components/VideoPlayerHybrid";
+import { VideoPlayerVAST } from "@/components/VideoPlayerVAST";
 import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
@@ -159,7 +159,11 @@ const Index = () => {
 
         {/* Video Player */}
         {streamUrl ? <div className="animate-in fade-in zoom-in slide-in-from-bottom-4 duration-700">
-            <VideoPlayer streamUrl={streamUrl} autoPlay />
+            <VideoPlayerVAST 
+              streamUrl={streamUrl} 
+              vastUrl="https://frail-benefit.com/dcmuFBz.daGiNHvGZXGuUf/Leym/9DuQZcUKlzk_PBTiYN2nO/D_g/x/OwTqYptQN/jrYC4bOWDEEe5hNKww"
+              autoPlay 
+            />
           </div> : <Card className="p-12 bg-card border-border border-dashed hover:border-primary/50 transition-all duration-300">
             <div className="text-center space-y-4">
               <div className="inline-flex p-4 rounded-full bg-primary/10 animate-pulse">
