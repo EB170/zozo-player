@@ -398,7 +398,7 @@ export const VideoPlayerHybrid = ({
     }
   }, [streamUrl, autoPlay, cleanup, scheduleRetry, getOptimalBufferSize, networkSpeed]);
 
-  // Créer player HLS
+  // Créer player HLS avec configuration PROFESSIONNELLE ultra-optimisée
   const createHlsPlayer = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -406,63 +406,100 @@ export const VideoPlayerHybrid = ({
       toast.error("HLS non supporté");
       return;
     }
-    console.log('🎬 Creating HLS player...');
+    console.log('🎬 Creating HLS player with PRO config...');
 
-    // ========== CONFIGURATION HLS ULTRA-STABLE (best practices CDN/ABR) ==========
+    // ========================================================================
+    // CONFIGURATION HLS.JS NIVEAU PRODUCTION (Best Practices Industrie)
+    // ========================================================================
     const hls = new Hls({
       debug: hlsDebugMode.current,
-      enableWorker: true,
+      enableWorker: true,  // CRITIQUE: Parsing TS dans Web Worker (libère main thread)
       
-      // ========== BUFFER: maximisé pour zéro saccade ==========
-      maxBufferLength: 90,              // 90s buffer forward (très large)
-      maxMaxBufferLength: 120,          // Cap 120s (tolérance maximale)
-      maxBufferSize: 100 * 1000 * 1000, // 100MB (évite tout underrun)
-      maxBufferHole: 0.2,               // 200ms tolérance gaps
+      // ========== 1. STRATÉGIE DE BUFFERING (ZÉRO COUPURE) ==========
+      // Concept : "Fenêtre glissante" large + tolérance maximale aux variations réseau
       
-      // ========== LIVE SYNC: latence vs stabilité ==========
-      liveSyncDurationCount: 5,         // 5 segments du live (marge confortable)
-      liveMaxLatencyDurationCount: 12,  // Max 12 segments retard (très tolérant)
+      // BUFFER FORWARD (combien précharger en avance)
+      maxBufferLength: 120,              // 120s buffer (2 min) - Netflix-level pour live stable
+      maxMaxBufferLength: 180,           // Cap absolu 3min (sécurité extrême)
+      maxBufferSize: 150 * 1000 * 1000,  // 150MB max (évite OOM sur mobiles tout en gardant marge)
+      maxBufferHole: 0.15,               // Tolérance 150ms pour gaps/discontinuités (très strict)
+      
+      // BUFFER BACKWARD (combien garder en arrière)
+      backBufferLength: 10,              // 10s historique (permet seek arrière rapide sans re-fetch)
+      
+      // ========== 2. LIVE SYNC OPTIMISÉ (Latence vs Stabilité) ==========
+      // Concept : Se positionner à N segments du bord live, avec marge de rattrapage
+      
+      // LIVE EDGE TARGETING (pour flux en direct)
+      liveSyncDurationCount: 4,          // Position cible : 4 segments du bord (ex: 4*6s = 24s latence)
+      liveMaxLatencyDurationCount: 10,   // Déclenche rattrapage si >10 segments de retard (60s max)
       liveDurationInfinity: false,
+      maxLiveSyncPlaybackRate: 1.08,     // Rattrapage progressif à 108% (imperceptible mais efficace)
       
-      // ========== BACK BUFFER (NETTOYAGE AUTO) ==========
-      backBufferLength: 15,             // 15s en arrière (sera nettoyé auto)
+      // ========== 3. ADAPTIVE BITRATE (ABR) ULTRA-STABLE ==========
+      // Concept : EWMA (Exponential Weighted Moving Average) pour lisser estimation BP
       
-      // ========== CHARGEMENT ROBUSTE ==========
-      manifestLoadingTimeOut: 10000,
-      fragLoadingTimeOut: 20000,        // 20s timeout fragments
-      levelLoadingTimeOut: 10000,
-      manifestLoadingMaxRetry: 4,
-      levelLoadingMaxRetry: 4,
-      fragLoadingMaxRetry: 6,           // 6 tentatives par fragment
-      manifestLoadingRetryDelay: 500,
+      // EWMA WEIGHTS (contrôle réactivité vs stabilité)
+      abrEwmaFastLive: 2.0,              // Fenêtre rapide 2s (réagit vite aux drops)
+      abrEwmaSlowLive: 12.0,             // Fenêtre lente 12s (lisse les variations, TRÈS stable)
+      abrEwmaDefaultEstimate: 500000,    // Estimation initiale 500kbps (conservative start)
+      
+      // BANDWIDTH SAFETY MARGINS (marges de sécurité pour switches)
+      abrBandWidthFactor: 0.90,          // Downswitch à 90% BP estimée (conservateur, évite buffering)
+      abrBandWidthUpFactor: 0.65,        // Upswitch seulement à 65% (TRÈS conservateur, évite saccades)
+      abrMaxWithRealBitrate: true,       // Utilise bitrate réel des segments (pas juste manifest)
+      minAutoBitrate: 0,                 // Pas de plancher (permet qualité minimale en 3G)
+      
+      // START LEVEL (qualité de démarrage)
+      startLevel: -1,                    // -1 = auto-detect via testBandwidth (meilleur compromis)
+      testBandwidth: true,               // Mesure BP réelle avant de commencer (évite mauvais démarrage)
+      
+      // ========== 4. RETRY POLICIES (Gestion Réseau Instable) ==========
+      // Concept : Backoff exponentiel + timeouts progressifs pour chaque type de ressource
+      
+      // MANIFEST RETRIES (fichier .m3u8)
+      manifestLoadingTimeOut: 12000,     // 12s timeout initial
+      manifestLoadingMaxRetry: 6,        // 6 tentatives (critique pour démarrage)
+      manifestLoadingRetryDelay: 500,    // 500ms délai initial
+      manifestLoadingMaxRetryTimeout: 60000, // Max 60s total retries
+      
+      // LEVEL RETRIES (playlists de qualité)
+      levelLoadingTimeOut: 10000,        // 10s timeout
+      levelLoadingMaxRetry: 6,           // 6 tentatives
       levelLoadingRetryDelay: 500,
-      fragLoadingRetryDelay: 500,       // Délai initial retry
+      levelLoadingMaxRetryTimeout: 60000,
       
-      // ========== ABR STABLE ==========
-      abrEwmaFastLive: 3,
-      abrEwmaSlowLive: 7,
-      abrBandWidthFactor: 0.95,
-      abrBandWidthUpFactor: 0.7,
-      abrMaxWithRealBitrate: true,
-      minAutoBitrate: 0,
+      // FRAGMENT RETRIES (segments .ts/.m4s) - LE PLUS CRITIQUE
+      fragLoadingTimeOut: 20000,         // 20s timeout (large pour connexions lentes)
+      fragLoadingMaxRetry: 10,           // 10 tentatives (absolument critique)
+      fragLoadingRetryDelay: 300,        // 300ms initial (rapide)
+      fragLoadingMaxRetryTimeout: 90000, // Max 90s (très tolérant)
       
-      // ========== ANTI-STALL ==========
-      maxStarvationDelay: 4,
-      maxLoadingDelay: 4,
-      highBufferWatchdogPeriod: 2,
-      nudgeOffset: 0.1,
-      nudgeMaxRetry: 3,
+      // ========== 5. ANTI-STALL & RECOVERY AUTOMATIQUE ==========
+      // Concept : Détection proactive + récupération invisible
       
-      // ========== PRÉCHARGEMENT ==========
-      startLevel: -1,
-      autoStartLoad: true,
-      startPosition: -1,
+      maxStarvationDelay: 8,             // 8s avant "panic mode" (très tolérant, évite faux positifs)
+      maxLoadingDelay: 8,                // 8s max chargement avant switch qualité
+      highBufferWatchdogPeriod: 1,       // Vérif buffer health chaque 1s (watchdog actif)
+      nudgeOffset: 0.05,                 // 50ms nudge pour dépasser trous (subtil)
+      nudgeMaxRetry: 5,                  // 5 nudges max avant abandon
       
-      // ========== PERFORMANCE ==========
-      maxFragLookUpTolerance: 0.2,
-      progressive: true,
-      lowLatencyMode: true,
-      maxLiveSyncPlaybackRate: 1.02     // Rattrapage 102%
+      // ========== 6. OPTIMISATIONS DEMUXER/REMUXER ==========
+      // Concept : Tolérance aux flux TS de mauvaise qualité (timestamps incorrects, paquets corrompus)
+      
+      // REMUXING (reconstruction des timestamps)
+      progressive: true,                 // Progressive streaming (lecture pendant DL)
+      forceKeyFrameOnDiscontinuity: true, // Force keyframe après discontinuité (évite glitches)
+      
+      // SEGMENT PARSING
+      maxFragLookUpTolerance: 0.15,      // Tolérance 150ms pour trouver fragment (strict)
+      
+      // PERFORMANCE LIVE
+      lowLatencyMode: false,             // DÉSACTIVÉ pour priorité stabilité (LL-HLS = moins stable)
+      
+      // PRÉCHARGEMENT
+      autoStartLoad: true,               // Démarrer chargement dès attachMedia
+      startPosition: -1                  // -1 = live edge automatique
     });
     // Logs debug optionnels
     if (hlsDebugMode.current) {
@@ -514,76 +551,211 @@ export const VideoPlayerHybrid = ({
       setCurrentLevel(data.level);
     });
 
-    // Gestion erreurs avec retry exponentiel et backoff
+    // ========================================================================
+    // GESTION D'ERREURS PROFESSIONNELLE (Error Handling Robuste)
+    // ========================================================================
     hls.on(Hls.Events.ERROR, (event, data) => {
       if (hlsDebugMode.current) {
         console.debug('[HLS ERROR]', data.type, data.details, 'Fatal:', data.fatal);
       }
       
+      // ========== ERREURS NON-FATALES (Auto-Recovery Silencieux) ==========
       if (!data.fatal) {
-        // Erreurs non-fatales : récupération douce
+        // NETWORK ERRORS (non-fatal)
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          if (data.details === 'bufferStalledError' || 
-              data.details === 'bufferAppendingError' ||
-              data.details === 'bufferSeekOverHole') {
-            console.log('🔧 Auto-recovering buffer issue...');
+          // Buffer stall : attendre puis relancer play()
+          if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+            console.log('🔧 Buffer stalled (non-fatal), auto-recovering...');
             setTimeout(() => {
-              if (videoRef.current && hlsRef.current) {
+              if (videoRef.current && hlsRef.current && videoRef.current.paused) {
                 videoRef.current.play().catch(() => {});
               }
             }, 1000);
           }
+          
+          // Buffer seek over hole : nudge forward
+          if (data.details === Hls.ErrorDetails.BUFFER_SEEK_OVER_HOLE) {
+            console.log('🔧 Buffer hole detected, nudging...');
+            setTimeout(() => {
+              if (videoRef.current && hlsRef.current) {
+                const currentTime = videoRef.current.currentTime;
+                videoRef.current.currentTime = currentTime + 0.1; // Nudge 100ms
+                videoRef.current.play().catch(() => {});
+              }
+            }, 500);
+          }
+          
+          // Buffer append error : réessayer
+          if (data.details === Hls.ErrorDetails.BUFFER_APPEND_ERROR) {
+            console.log('🔧 Buffer append error (non-fatal), continuing...');
+            // HLS.js gère automatiquement, on log juste
+          }
         }
-        return;
+        
+        // MEDIA ERRORS (non-fatal)
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          // Erreurs de décodage : HLS.js tente recovery auto
+          console.log('🔧 Media error (non-fatal):', data.details);
+        }
+        
+        return; // Ne pas continuer pour non-fatal
       }
 
-      // Erreurs FATALES
+      // ========== ERREURS FATALES (Stratégies de Recovery) ==========
       console.error('🔴 HLS Fatal Error:', data.type, data.details);
 
-      // Retry avec backoff exponentiel pour fragment errors
+      // STRATÉGIE 1 : FRAGMENT LOAD ERRORS (Les plus fréquents)
+      // → Retry avec backoff exponentiel progressif
       if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR || 
-          data.details === Hls.ErrorDetails.FRAG_LOAD_TIMEOUT) {
+          data.details === Hls.ErrorDetails.FRAG_LOAD_TIMEOUT ||
+          data.details === Hls.ErrorDetails.FRAG_PARSING_ERROR) {
+        
         fragErrorCountRef.current++;
         
-        if (fragErrorCountRef.current <= 6) {
-          const delay = 500 * Math.pow(1.5, fragErrorCountRef.current - 1);
-          console.log(`🔄 Retry fragment ${fragErrorCountRef.current}/6 in ${delay}ms`);
+        // Phase 1 : Retries rapides (8 tentatives max)
+        if (fragErrorCountRef.current <= 8) {
+          const delay = 300 * Math.pow(1.8, fragErrorCountRef.current - 1); // 300ms → 540ms → 972ms → 1.7s...
+          console.log(`🔄 Retry fragment ${fragErrorCountRef.current}/8 in ${Math.round(delay)}ms`);
           
           setTimeout(() => {
             if (hlsRef.current) {
-              hlsRef.current.startLoad();
+              try {
+                // Tenter startLoad() avec position actuelle
+                const currentTime = videoRef.current?.currentTime || 0;
+                hlsRef.current.startLoad(currentTime);
+              } catch (e) {
+                console.error('startLoad failed:', e);
+              }
             }
           }, delay);
           return;
         }
+        
+        // Phase 2 : Si 8 retries échouent, tenter switch qualité inférieure
+        if (fragErrorCountRef.current === 9 && hls.currentLevel > 0) {
+          console.log('🔽 Too many frag errors, forcing lower quality...');
+          hls.currentLevel = Math.max(0, hls.currentLevel - 1);
+          fragErrorCountRef.current = 0; // Reset compteur
+          setTimeout(() => {
+            if (hlsRef.current) hlsRef.current.startLoad();
+          }, 500);
+          return;
+        }
+        
+        // Phase 3 : Dernier recours - recreate player complet
+        console.error('💥 Fragment errors exhausted, recreating player...');
+        cleanup();
+        scheduleRetry(() => createHlsPlayer());
+        return;
       }
 
-      // Autres erreurs fatales
-      switch (data.type) {
-        case Hls.ErrorTypes.NETWORK_ERROR:
-          console.log('🔄 Network error, retrying with startLoad...');
-          scheduleRetry(() => {
-            if (hlsRef.current) {
-              hlsRef.current.startLoad();
-            }
-          });
-          break;
-          
-        case Hls.ErrorTypes.MEDIA_ERROR:
-          console.log('🔄 Media error, attempting recovery...');
+      // STRATÉGIE 2 : MANIFEST ERRORS
+      // → Retry avec backoff + fallback quality
+      if (data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
+          data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
+          data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR) {
+        
+        console.log('🔄 Manifest error, retrying...');
+        cleanup();
+        scheduleRetry(() => createHlsPlayer());
+        return;
+      }
+
+      // STRATÉGIE 3 : MEDIA ERRORS (Corruption, Codec Issues)
+      // → Tenter recoverMediaError() → swapAudioCodec() → recreate
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        console.log('🔄 Media error, attempting recovery...');
+        
+        // Tentative 1 : recoverMediaError()
+        if (fragErrorCountRef.current === 0) {
+          fragErrorCountRef.current++;
           try {
+            console.log('🔧 Trying hls.recoverMediaError()...');
             hls.recoverMediaError();
+            
+            // Reset compteur après 5s si succès
+            setTimeout(() => {
+              if (hlsRef.current && videoRef.current && !videoRef.current.paused) {
+                fragErrorCountRef.current = 0;
+                console.log('✅ Media recovery successful');
+              }
+            }, 5000);
+            return;
           } catch (e) {
-            console.error('Recovery failed, recreating player');
-            cleanup();
-            scheduleRetry(() => createHlsPlayer());
+            console.error('recoverMediaError() failed:', e);
           }
-          break;
-          
-        default:
-          cleanup();
-          scheduleRetry(() => createHlsPlayer());
-          break;
+        }
+        
+        // Tentative 2 : swapAudioCodec() (si disponible)
+        if (fragErrorCountRef.current === 1) {
+          fragErrorCountRef.current++;
+          try {
+            console.log('🔧 Trying hls.swapAudioCodec()...');
+            hls.swapAudioCodec();
+            hls.recoverMediaError();
+            
+            setTimeout(() => {
+              if (hlsRef.current && videoRef.current && !videoRef.current.paused) {
+                fragErrorCountRef.current = 0;
+                console.log('✅ Codec swap successful');
+              }
+            }, 5000);
+            return;
+          } catch (e) {
+            console.error('swapAudioCodec() failed:', e);
+          }
+        }
+        
+        // Tentative 3 : Recreate complet
+        console.error('💥 Media recovery exhausted, recreating player...');
+        cleanup();
+        scheduleRetry(() => createHlsPlayer());
+        return;
+      }
+
+      // STRATÉGIE 4 : NETWORK ERRORS (Fatal)
+      // → startLoad() immédiat puis recreate si échec
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        console.log('🔄 Fatal network error, attempting startLoad...');
+        
+        if (fragErrorCountRef.current < 3) {
+          fragErrorCountRef.current++;
+          setTimeout(() => {
+            if (hlsRef.current) {
+              try {
+                const currentTime = videoRef.current?.currentTime || 0;
+                hlsRef.current.startLoad(currentTime);
+              } catch (e) {
+                console.error('startLoad failed, recreating...');
+                cleanup();
+                scheduleRetry(() => createHlsPlayer());
+              }
+            }
+          }, 1000);
+          return;
+        }
+        
+        // Si 3 tentatives startLoad échouent, recreate
+        cleanup();
+        scheduleRetry(() => createHlsPlayer());
+        return;
+      }
+
+      // STRATÉGIE 5 : AUTRES ERREURS (MUX, KEY, etc.)
+      // → Recreate immédiat
+      console.error('💥 Unhandled fatal error, recreating player...');
+      cleanup();
+      scheduleRetry(() => createHlsPlayer());
+    });
+    
+    // ========================================================================
+    // GESTION BUFFER ISSUES (Tolérance Flux TS Corrompus)
+    // ========================================================================
+    // Surveillance buffer appending (détection problèmes timestamps/corruption)
+    hls.on(Hls.Events.BUFFER_APPENDING, (event, data) => {
+      // Log pour debug si nécessaire
+      if (hlsDebugMode.current) {
+        console.debug('[HLS] BUFFER_APPENDING', data);
       }
     });
 
@@ -596,7 +768,63 @@ export const VideoPlayerHybrid = ({
       setIsLoading(false);
     });
     
-    // === MAINTENANCE LONG-TERME HLS: vérification périodique ===
+    // ========================================================================
+    // LIVE EDGE MANAGEMENT (Rattrapage Intelligent du Direct)
+    // ========================================================================
+    const liveEdgeIntervalRef = { current: null as NodeJS.Timeout | null };
+    
+    if (streamUrl.includes('m3u8')) {
+      // Pour flux live uniquement
+      liveEdgeIntervalRef.current = setInterval(() => {
+        if (!video || !hls || video.paused) return;
+        
+        // Vérifier distance du live edge
+        const liveSyncPosition = hls.liveSyncPosition;
+        if (liveSyncPosition !== null && liveSyncPosition > 0) {
+          const currentTime = video.currentTime;
+          const latency = liveSyncPosition - currentTime;
+          
+          // Si latence > 60s (trop de retard), rattraper progressivement
+          if (latency > 60) {
+            console.warn(`⏩ Live latency too high (${latency.toFixed(1)}s), catching up...`);
+            
+            // Option 1 : Accélérer playback rate progressivement (préféré car invisible)
+            const targetRate = Math.min(1.15, 1 + (latency / 120)); // Max 115% speed
+            if (video.playbackRate !== targetRate) {
+              video.playbackRate = targetRate;
+              console.log(`🚀 Playback rate: ${targetRate.toFixed(2)}x`);
+            }
+            
+            // Revenir à vitesse normale quand <30s de latence
+            if (latency < 30 && video.playbackRate !== 1.0) {
+              video.playbackRate = 1.0;
+              console.log('✅ Playback rate normalized');
+            }
+          }
+          
+          // Si latence > 120s (manifest gelé ou erreur grave), seek direct
+          if (latency > 120) {
+            console.error('🚨 Live edge critically behind, seeking directly...');
+            video.currentTime = liveSyncPosition - 10; // Se positionner à -10s du live
+            video.playbackRate = 1.0;
+          }
+          
+          // Si latence < 10s (trop proche du live, risque buffering), ralentir
+          if (latency < 10 && latency > 0) {
+            if (video.playbackRate !== 0.95) {
+              video.playbackRate = 0.95; // 95% speed (ralentir légèrement)
+              console.log('🐌 Too close to live edge, slowing down to 0.95x');
+            }
+          }
+        }
+      }, 5000); // Check tous les 5s
+      
+      (hls as any)._liveEdgeInterval = liveEdgeIntervalRef.current;
+    }
+    
+    // ========================================================================
+    // MAINTENANCE LONG-TERME HLS: Vérification Périodique & Cleanup
+    // ========================================================================
     const hlsMaintenanceInterval = setInterval(() => {
       if (!video || !hls) return;
       
@@ -607,16 +835,18 @@ export const VideoPlayerHybrid = ({
         console.log(`🔧 HLS Maintenance (uptime: ${uptimeMinutes.toFixed(1)}min)`);
         
         try {
-          // Vérifier qualité playback
+          // Vérifier qualité playback (frames perdus)
           const quality = (video as any).getVideoPlaybackQuality?.();
           if (quality) {
             const dropRate = quality.droppedVideoFrames / (quality.totalVideoFrames || 1);
             
             if (dropRate > 0.08) { // Seuil 8% pour HLS
-              console.warn(`⚠️ HLS qualité dégradée, recoverMediaError...`);
+              console.warn(`⚠️ HLS qualité dégradée (${(dropRate * 100).toFixed(1)}% drops), recoverMediaError...`);
               try {
                 hls.recoverMediaError();
-              } catch (e) {}
+              } catch (e) {
+                console.error('recoverMediaError failed:', e);
+              }
             }
           }
           
@@ -624,18 +854,36 @@ export const VideoPlayerHybrid = ({
           const bufferInfo = hls.media?.buffered;
           if (bufferInfo && bufferInfo.length > 0) {
             const totalBuffered = bufferInfo.end(bufferInfo.length - 1) - bufferInfo.start(0);
-            if (totalBuffered > 120) { // Si >2min buffered
-              console.log('🧹 HLS buffer cleanup...');
+            
+            // Si buffer >180s (trop grand, risque memory), cleanup
+            if (totalBuffered > 180) {
+              console.log(`🧹 HLS buffer trop grand (${totalBuffered.toFixed(1)}s), cleanup...`);
               const currentTime = video.currentTime;
               hls.stopLoad();
-              hls.startLoad(currentTime - 5);
+              hls.startLoad(Math.max(0, currentTime - 10)); // Garder 10s arrière
             }
+          }
+          
+          // Vérifier si le manifest se met encore à jour (détection gel)
+          const lastLoadedTime = (hls as any)._lastManifestLoadTime || Date.now();
+          const timeSinceLastLoad = Date.now() - lastLoadedTime;
+          
+          if (timeSinceLastLoad > 120000) { // Si >2min sans update manifest
+            console.error('🚨 Manifest appears frozen, forcing reload...');
+            const currentTime = video.currentTime;
+            hls.stopLoad();
+            hls.startLoad(currentTime);
           }
         } catch (e) {
           console.warn('HLS maintenance error:', e);
         }
       }
     }, 60 * 1000); // Vérifier chaque minute
+    
+    // Tracker dernière mise à jour manifest pour détection gel
+    hls.on(Hls.Events.MANIFEST_LOADED, () => {
+      (hls as any)._lastManifestLoadTime = Date.now();
+    });
     
     (hls as any)._maintenanceInterval = hlsMaintenanceInterval;
     memoryCleanupIntervalRef.current = hlsMaintenanceInterval;
