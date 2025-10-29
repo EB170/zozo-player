@@ -69,9 +69,11 @@
     "tailwindcss-animate": "^1.0.7",
     "vaul": "^0.9.9",
     "video.js": "^8.23.4",
+    "videojs-contrib-ads": "^7.5.2",
     "videojs-contrib-hls": "^5.15.0",
     "videojs-contrib-quality-levels": "^4.1.0",
     "videojs-http-source-selector": "^1.1.6",
+    "videojs-ima": "^2.4.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
